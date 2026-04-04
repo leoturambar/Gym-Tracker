@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+.env
+
+# Dati personali (non vuoi i tuoi allenamenti su GitHub pubblico)
+data/sessions.csv
+
+# VSCodium
+.vscode/
