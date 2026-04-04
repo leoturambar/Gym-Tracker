@@ -397,7 +397,7 @@ with tab_llm:
         st.divider()
 
         if st.button("🤖 Genera analisi", type="primary"):
-            with st.spinner("Claude sta analizzando i tuoi allenamenti…"):
+            with st.spinner("Patches O'Houlihan sta analizzando i tuoi allenamenti…"):
                 try:
                     analysis = get_llm_analysis(user_profile, df_cur, df_prev, focus)
                     st.markdown(analysis)
