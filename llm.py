@@ -1,8 +1,53 @@
-import anthropic
+import os
+import pandas as pd
 from data_manager import load_sessions, get_bodyweight_on
 from metrics import compute_rtv
 from config import MUSCLES, EX_MUSCLES
 
+# ── Selezione backend LLM ─────────────────────────────────────────────────────
+# Cambia questo flag per switchare tra Claude e Ollama
+LLM_BACKEND = "ollama"  # "claude" oppure "ollama"
+
+OLLAMA_MODEL = "qwen2.5:14b"
+OLLAMA_BASE_URL = "http://localhost:11434/v1"
+
+CLAUDE_MODEL = "claude-sonnet-4-20250514"
+
+
+def get_client():
+    """Restituisce il client LLM appropriato in base al backend scelto."""
+    if LLM_BACKEND == "claude":
+        import anthropic
+        return anthropic.Anthropic()
+    else:
+        from openai import OpenAI
+        return OpenAI(
+            base_url=OLLAMA_BASE_URL,
+            api_key="ollama"  # valore richiesto ma non verificato da Ollama
+        )
+
+
+def call_llm(prompt: str) -> str:
+    """Chiama il backend LLM selezionato e restituisce la risposta."""
+    if LLM_BACKEND == "claude":
+        client = get_client()
+        message = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return message.content[0].text
+    else:
+        client = get_client()
+        response = client.chat.completions.create(
+            model=OLLAMA_MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content
+
+
+# ── Costruzione contesto ──────────────────────────────────────────────────────
 
 def build_session_summary(n_sessions: int = 10) -> str:
     """
@@ -13,7 +58,6 @@ def build_session_summary(n_sessions: int = 10) -> str:
     if df.empty:
         return "Nessuna sessione registrata ancora."
 
-    # prende le ultime N sessioni uniche
     recent_ids = (
         df[['session_id', 'date']]
         .drop_duplicates()
@@ -53,10 +97,7 @@ def build_session_summary(n_sessions: int = 10) -> str:
 
 
 def build_muscle_summary(df_current, df_previous=None) -> str:
-    """
-    Costruisce un testo con i punteggi muscolari correnti
-    e il confronto con il periodo precedente se disponibile.
-    """
+    """Costruisce testo con distribuzione muscolare e confronto periodo."""
     from metrics import compute_muscle_scores, normalize_scores
 
     scores_cur = normalize_scores(compute_muscle_scores(df_current, 'rtv'))
@@ -77,50 +118,42 @@ def build_muscle_summary(df_current, df_previous=None) -> str:
     return '\n'.join(lines)
 
 
+# ── Analisi principale ────────────────────────────────────────────────────────
+
 def get_llm_analysis(user_profile: dict, df_current, df_previous=None,
                      focus: str = 'general') -> str:
     """
-    Manda il contesto dell'allenamento a Claude e restituisce l'analisi.
-
+    Genera analisi dell'allenamento via LLM.
     focus: 'general' | 'balance' | 'progression' | 'next_session'
     """
     session_summary = build_session_summary()
     muscle_summary = build_muscle_summary(df_current, df_previous)
 
     focus_instructions = {
-        'general': "Dai un'analisi generale dell'andamento degli allenamenti.",
-        'balance': "Concentrati sull'equilibrio muscolare. Ci sono gruppi sovra o sotto-allenati?",
-        'progression': "Analizza la progressione dei carichi nel tempo. Si sta progredendo?",
-        'next_session': "Suggerisci come impostare la prossima sessione basandoti sui dati.",
+        'general':      "Provide a general analysis of training progress and patterns.",
+        'balance':      "Focus on muscular balance. Are any groups over or undertrained?",
+        'progression':  "Analyze load progression over time. Is there consistent progress?",
+        'next_session': "Suggest how to approach the next session based on the data.",
     }
 
-    prompt = f"""Sei un coach di allenamento esperto. Analizza i dati di allenamento seguenti 
-e fornisci feedback concreto e actionable in italiano.
+    prompt = f"""You are an expert strength and conditioning coach. Analyze the following training data
+and provide concrete, actionable feedback based on the actual numbers.
 
-PROFILO ATLETA:
-- Peso corporeo attuale: {user_profile.get('bodyweight', 'non disponibile')} kg
-- Obiettivo: {user_profile.get('goal', 'non specificato')}
-- Note persistenti (infortuni, limitazioni, obiettivi): {user_profile.get('memory', 'nessuna')}
+ATHLETE PROFILE:
+- Current body weight: {user_profile.get('bodyweight', 'not available')} kg
+- Goal: {user_profile.get('goal', 'not specified')}
+- Persistent notes (injuries, limitations, long-term goals): {user_profile.get('memory', 'none')}
 
-STORICO SESSIONI RECENTI:
+RECENT SESSION HISTORY:
 {session_summary}
 
 {muscle_summary}
 
-FOCUS DELL'ANALISI:
+ANALYSIS FOCUS:
 {focus_instructions.get(focus, focus_instructions['general'])}
 
-Sii diretto, specifico, e basa i tuoi commenti sui numeri reali. 
-Evita consigli generici. Massimo 300 parole."""
+Be direct and specific. Base your comments on the actual numbers provided.
+Avoid generic advice. Maximum 500 words. Always end your response with this exact quote:
+"If you can dodge a wrench, you can dodge a ball." """
 
-    client = anthropic.Anthropic()
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return message.content[0].text
-
-
-import pandas as pd
+    return call_llm(prompt)
