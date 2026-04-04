@@ -5,6 +5,8 @@ __pycache__/
 
 # Dati personali (non vuoi i tuoi allenamenti su GitHub pubblico)
 data/sessions.csv
+data/bodyweight.csv
+data/memory.txt
 
 # VSCodium
 .vscode/
