@@ -211,7 +211,7 @@ with tab_progressi:
         margin=dict(l=0, r=0, t=20, b=0),
         height=300,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     # grafico RTV nel tempo
     if df_prog['rtv'].sum() > 0:
@@ -235,7 +235,7 @@ with tab_progressi:
             margin=dict(l=0, r=0, t=20, b=0),
             height=300,
         )
-        st.plotly_chart(fig_rtv, use_container_width=True)
+        st.plotly_chart(fig_rtv, width='stretch')
     else:
         st.caption("Imposta il peso corporeo nel tab Profilo per vedere il grafico RTV.")
 
@@ -336,7 +336,7 @@ with tab_radar:
             margin=dict(l=40, r=40, t=40, b=40)
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         # barre orizzontali
         st.subheader(f"{label_a} — {'frequenza' if metric == 'freq' else 'RTV'}")
@@ -426,7 +426,7 @@ with tab_profilo:
             st.caption("Storico peso corporeo")
             st.dataframe(
                 df_bw.sort_values('date', ascending=False).reset_index(drop=True),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True
             )
         else:
