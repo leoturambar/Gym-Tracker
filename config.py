@@ -113,3 +113,16 @@ EX_MUSCLES = {
 # Riferimento temporale per esercizi timed (secondi)
 # RTV = durata_effettiva / TIMED_REFERENCE
 TIMED_REFERENCE = 120
+
+# Atleta di riferimento — RTV assoluto per gruppo muscolare per settimana completa
+# Basato sulla tua scheda, atleta ~75kg che esegue tutti gli esercizi con buoni carichi
+REFERENCE_ATHLETE = {
+    'Petto':        2.0,   # chest press x2 + dips
+    'Spalle':       1.8,   # shoulder press + delts machine x2
+    'Tricipiti':    2.2,   # dips + tricipiti cavi + shoulder press x2
+    'Quadricipiti': 3.5,   # leg press x2 + leg extension + adduttori x2 + calf x2
+    'Femorali':     2.8,   # leg curl + iperestensioni + abduttori x2 + glute
+    'Schiena':      3.0,   # trazioni + rematore + pulley + lat machine + scapular
+    'Bicipiti':     1.5,   # trazioni + curl + lat machine
+    'Core':         3.2,   # plank x4 + hanging x2 + abs x2 + russian + addominali
+}

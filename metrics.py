@@ -92,8 +92,8 @@ def filter_by_period(df: pd.DataFrame, period: str) -> tuple[pd.DataFrame, pd.Da
     today = pd.Timestamp.today().normalize()
 
     if period == 'week':
-        start_cur = today - pd.offsets.Week(weekday=0)
-        start_prev = start_cur - pd.Timedelta(weeks=1)
+        start_cur = today - pd.Timedelta(days=7)
+        start_prev = today - pd.Timedelta(days=14)
         end_prev = start_cur
     elif period == 'month':
         start_cur = today.replace(day=1)

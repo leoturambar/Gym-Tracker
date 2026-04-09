@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import time
-from config import DAYS, MUSCLES
+from config import DAYS, MUSCLES, REFERENCE_ATHLETE
 from data_manager import (
     init_files, load_sessions, save_session, delete_session,
     get_last_values, save_bodyweight, load_bodyweight,
@@ -111,6 +111,7 @@ with tab_log:
                      selected_day['id'], selected_day['name'],
                      exercises, note)
         st.success("Sessione salvata!")
+        time.sleep(1)
         st.rerun()
 
 with tab_storico:
@@ -253,8 +254,8 @@ with tab_radar:
         with col1:
             metric = st.radio(
                 "Metrica",
-                options=['freq', 'rtv'],
-                format_func=lambda x: 'Frequenza esercizi' if x == 'freq' else 'Carico relativo (RTV)',
+                options=['rtv', 'freq'],
+                format_func=lambda x: 'Carico relativo (RTV)' if x == 'rtv' else 'Frequenza esercizi',
                 horizontal=True
             )
         with col2:
@@ -270,57 +271,86 @@ with tab_radar:
                 horizontal=True
             )
 
-        # avviso se RTV ma nessun peso corporeo
+        show_reference = st.checkbox("Mostra atleta di riferimento", value=False)
+
         if metric == 'rtv' and df_all['bodyweight'].isna().all():
             st.warning("Imposta il peso corporeo nel tab Profilo per usare la metrica RTV.")
 
-        # calcolo scores
+        # calcolo scores — valori assoluti, nessuna normalizzazione
         if period == 'all':
-            scores_a = normalize_scores(compute_muscle_scores(df_all, metric))
-            # schema come riferimento
+            scores_a = compute_muscle_scores(df_all, metric)
+            # schema come riferimento — conta esercizi per gruppo
             from config import EX_MUSCLES
             schema_scores = {m: 0.0 for m in MUSCLES}
             for day in DAYS:
                 for ex in day['exercises']:
                     for m in EX_MUSCLES.get(ex['name'], []):
                         schema_scores[m] += 1.0
-            max_s = max(schema_scores.values()) or 1
-            scores_b = {m: v / max_s for m, v in schema_scores.items()}
-            label_a, label_b = 'Reale', 'Schema pianificato'
+            scores_b = schema_scores
+            label_a, label_b = 'Reale (tutto)', 'Schema pianificato'
         else:
             df_cur, df_prev = filter_by_period(df_all, period)
-            scores_a = normalize_scores(compute_muscle_scores(df_cur, metric))
-            scores_b = normalize_scores(compute_muscle_scores(df_prev, metric))
+            scores_a = compute_muscle_scores(df_cur, metric)
+            scores_b = compute_muscle_scores(df_prev, metric)
             label_a, label_b = {
-                'week':  ('Questa settimana', 'Settimana scorsa'),
+                'week':  ('Ultimi 7 giorni', '7 giorni precedenti'),
                 'month': ('Questo mese',      'Mese scorso'),
                 'year':  ("Quest'anno",        'Anno scorso'),
             }[period]
 
-        # radar chart con plotly
+        # range assi — massimo tra tutti i valori mostrati
+        period_multiplier = {
+                'all':   1,
+                'week':  1,
+                'month': 4,
+                'year':  48,
+            }[period]
+
+        all_values = list(scores_a.values()) + list(scores_b.values())
+        if show_reference:
+            all_values += [v * period_multiplier for v in REFERENCE_ATHLETE.values()]
+        max_val = max(all_values) if all_values else 1
+        axis_max = max_val * 1.15  # 15% margine
+
         categories = MUSCLES + [MUSCLES[0]]
         values_a = [scores_a.get(m, 0) for m in MUSCLES] + [scores_a.get(MUSCLES[0], 0)]
         values_b = [scores_b.get(m, 0) for m in MUSCLES] + [scores_b.get(MUSCLES[0], 0)]
 
         fig = go.Figure()
+
+        # poligono B (riferimento temporale o schema)
         fig.add_trace(go.Scatterpolar(
             r=values_b, theta=categories,
             fill='toself', name=label_b,
             line=dict(color='#5090ff', dash='dash', width=1.5),
             fillcolor='rgba(80,144,255,0.1)'
         ))
+
+        # poligono A (reale corrente)
         fig.add_trace(go.Scatterpolar(
             r=values_a, theta=categories,
             fill='toself', name=label_a,
             line=dict(color='#00c878', width=2),
             fillcolor='rgba(0,200,120,0.18)'
         ))
+
+        # poligono reference atleta (opzionale)
+        if show_reference:
+            values_ref = [REFERENCE_ATHLETE.get(m, 0) * period_multiplier for m in MUSCLES] + \
+                        [REFERENCE_ATHLETE.get(MUSCLES[0], 0) * period_multiplier]
+            fig.add_trace(go.Scatterpolar(
+                r=values_ref, theta=categories,
+                fill='toself', name='Atleta di riferimento',
+                line=dict(color='#FF8C00', dash='dot', width=1.5),
+                fillcolor='rgba(255,140,0,0.07)'
+            ))
+
         fig.update_layout(
             polar=dict(
-                bgcolor='rgba(240,240,240,0.1)',
+                bgcolor='rgba(240,240,240,0.3)',
                 radialaxis=dict(
                     visible=True,
-                    range=[0, 1],
+                    range=[0, axis_max],
                     tickfont=dict(size=11, color='#666666'),
                     gridcolor='rgba(150,150,150,0.4)',
                     linecolor='rgba(150,150,150,0.4)',
@@ -335,14 +365,16 @@ with tab_radar:
             height=500,
             margin=dict(l=40, r=40, t=40, b=40)
         )
-        
+
         st.plotly_chart(fig, width='stretch')
 
-        # barre orizzontali
-        st.subheader(f"{label_a} — {'frequenza' if metric == 'freq' else 'RTV'}")
+        # barre orizzontali con valori assoluti
+        st.subheader(f"{label_a} — {'RTV' if metric == 'rtv' else 'frequenza'}")
+        max_bar = max(scores_a.values()) if scores_a.values() else 1
         for m in MUSCLES:
             v = scores_a.get(m, 0)
-            st.progress(v, text=f"{m}: {v:.2f}")
+            pct = v / max_bar if max_bar > 0 else 0
+            st.progress(pct, text=f"{m}: {v:.2f}")
 
 with tab_llm:
     st.header("Analisi AI")
@@ -415,7 +447,9 @@ with tab_profilo:
     col1, col2 = st.columns(2)
     with col1:
         bw_date = st.date_input("Data misurazione", value=pd.Timestamp.today(), key="bw_date")
-        bw_value = st.number_input("Peso (kg)", min_value=30.0, max_value=200.0, step=0.5, key="bw_value")
+        df_bw_current = load_bodyweight()
+        last_bw = float(df_bw_current.sort_values('date', ascending=False).iloc[0]['bodyweight']) if not df_bw_current.empty else 75.0
+        bw_value = st.number_input("Peso (kg)", min_value=30.0, max_value=200.0, step=0.5, value=last_bw, key="bw_value")
         if st.button("💾 Salva peso", type="primary"):
             save_bodyweight(bw_value, str(bw_date))
             st.success(f"Peso {bw_value} kg salvato per il {bw_date}.")
