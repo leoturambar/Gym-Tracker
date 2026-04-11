@@ -101,7 +101,6 @@ EX_MUSCLES = {
     'Rematore':                     ['Schiena', 'Bicipiti'],
     'Pulley basso':                 ['Schiena', 'Bicipiti'],
     'Curl':                         ['Bicipiti'],
-    'Plank':                        ['Core'],
     'Plank laterale':               ['Core'],
     'Leg curl':                     ['Femorali'],
     'Leg press (piedi alti/larghi)':['Femorali', 'Quadricipiti'],

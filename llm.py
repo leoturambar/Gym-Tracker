@@ -1,6 +1,5 @@
-import os
 import pandas as pd
-from data_manager import load_sessions, get_bodyweight_on
+from data_manager import get_bodyweight_on
 from metrics import compute_rtv
 from config import MUSCLES, EX_MUSCLES
 
@@ -49,12 +48,12 @@ def call_llm(prompt: str) -> str:
 
 # ── Costruzione contesto ──────────────────────────────────────────────────────
 
-def build_session_summary(n_sessions: int = 10) -> str:
+def build_session_summary(df: pd.DataFrame, n_sessions: int = 10) -> str:
     """
-    Costruisce un testo riassuntivo delle ultime N sessioni,
+    Costruisce un testo riassuntivo delle ultime N sessioni nel DataFrame fornito,
     da passare come contesto al LLM.
+    df deve avere già la colonna 'bodyweight' (via enrich_with_bodyweight).
     """
-    df = load_sessions()
     if df.empty:
         return "Nessuna sessione registrata ancora."
 
@@ -73,7 +72,7 @@ def build_session_summary(n_sessions: int = 10) -> str:
         date = sess.iloc[0]['date']
         day_name = sess.iloc[0]['day_name']
         note = sess.iloc[0]['note'] if pd.notna(sess.iloc[0]['note']) else ''
-        bw = get_bodyweight_on(date)
+        bw = sess.iloc[0].get('bodyweight') if 'bodyweight' in sess.columns else get_bodyweight_on(date)
 
         lines.append(f"\n--- {date} | {day_name} ---")
         if bw:
@@ -126,7 +125,7 @@ def get_llm_analysis(user_profile: dict, df_current, df_previous=None,
     Genera analisi dell'allenamento via LLM.
     focus: 'general' | 'balance' | 'progression' | 'next_session'
     """
-    session_summary = build_session_summary()
+    session_summary = build_session_summary(df_current)
     muscle_summary = build_muscle_summary(df_current, df_previous)
 
     focus_instructions = {
