@@ -144,3 +144,18 @@ def save_memory(text: str):
     """Salva le note persistenti del profilo atleta."""
     with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
         f.write(text)
+
+
+GOAL_FILE = 'data/goal.txt'
+
+def load_goal() -> str:
+    """Carica l'obiettivo di allenamento salvato."""
+    if not os.path.exists(GOAL_FILE):
+        return ''
+    with open(GOAL_FILE, 'r', encoding='utf-8') as f:
+        return f.read().strip()
+
+def save_goal(goal: str):
+    """Salva l'obiettivo di allenamento."""
+    with open(GOAL_FILE, 'w', encoding='utf-8') as f:
+        f.write(goal)

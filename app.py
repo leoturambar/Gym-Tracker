@@ -6,7 +6,7 @@ from config import DAYS, MUSCLES, REFERENCE_ATHLETE
 from data_manager import (
     init_files, load_sessions, save_session, delete_session,
     get_last_values, save_bodyweight, load_bodyweight,
-    get_bodyweight_on, load_memory, save_memory
+    get_bodyweight_on, load_memory, save_memory, load_goal, save_goal
 )
 from metrics import (
     compute_muscle_scores, normalize_scores,
@@ -191,54 +191,54 @@ with tab_progressi:
 
         st.divider()
 
-    # grafico carico nel tempo
-    st.subheader("Carico (kg)")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df_prog['date'],
-        y=df_prog['value'],
-        mode='lines+markers',
-        name='kg',
-        line=dict(color='#00c878', width=2),
-        marker=dict(size=8)
-    ))
-    fig.update_layout(
-        yaxis=dict(
-            range=[
-                df_prog['value'].min() * 0.85,
-                df_prog['value'].max() * 1.15
-            ]
-        ),
-        margin=dict(l=0, r=0, t=20, b=0),
-        height=300,
-    )
-    st.plotly_chart(fig, width='stretch')
-
-    # grafico RTV nel tempo
-    if df_prog['rtv'].sum() > 0:
-        st.subheader("RTV nel tempo")
-        fig_rtv = go.Figure()
-        fig_rtv.add_trace(go.Scatter(
+        # grafico carico nel tempo
+        st.subheader("Carico (kg)")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
             x=df_prog['date'],
-            y=df_prog['rtv'],
+            y=df_prog['value'],
             mode='lines+markers',
-            name='RTV',
-            line=dict(color='#5090ff', width=2),
+            name='kg',
+            line=dict(color='#00c878', width=2),
             marker=dict(size=8)
         ))
-        fig_rtv.update_layout(
+        fig.update_layout(
             yaxis=dict(
                 range=[
-                    df_prog['rtv'].min() * 0.85,
-                    df_prog['rtv'].max() * 1.15
+                    df_prog['value'].min() * 0.85,
+                    df_prog['value'].max() * 1.15
                 ]
             ),
             margin=dict(l=0, r=0, t=20, b=0),
             height=300,
         )
-        st.plotly_chart(fig_rtv, width='stretch')
-    else:
-        st.caption("Imposta il peso corporeo nel tab Profilo per vedere il grafico RTV.")
+        st.plotly_chart(fig, width='stretch')
+
+        # grafico RTV nel tempo
+        if df_prog['rtv'].sum() > 0:
+            st.subheader("RTV nel tempo")
+            fig_rtv = go.Figure()
+            fig_rtv.add_trace(go.Scatter(
+                x=df_prog['date'],
+                y=df_prog['rtv'],
+                mode='lines+markers',
+                name='RTV',
+                line=dict(color='#5090ff', width=2),
+                marker=dict(size=8)
+            ))
+            fig_rtv.update_layout(
+                yaxis=dict(
+                    range=[
+                        df_prog['rtv'].min() * 0.85,
+                        df_prog['rtv'].max() * 1.15
+                    ]
+                ),
+                margin=dict(l=0, r=0, t=20, b=0),
+                height=300,
+            )
+            st.plotly_chart(fig_rtv, width='stretch')
+        else:
+            st.caption("Imposta il peso corporeo nel tab Profilo per vedere il grafico RTV.")
 
 with tab_radar:
     st.header("Radar muscolare")
@@ -303,7 +303,7 @@ with tab_radar:
                 'all':   1,
                 'week':  1,
                 'month': 4,
-                'year':  48,
+                'year':  52,
             }[period]
 
         all_values = list(scores_a.values()) + list(scores_b.values())
@@ -488,11 +488,16 @@ with tab_profilo:
 
     # ── Obiettivo allenamento ─────────────────────────────────────────────
     st.subheader("Obiettivo")
-    goal = st.selectbox("Obiettivo principale", [
+    goal_options = [
         "Ipertrofia (aumento massa muscolare)",
         "Forza (aumento carichi)",
         "Resistenza muscolare",
         "Ricomposizione corporea",
         "Mantenimento",
-    ])
+    ]
+    saved_goal = load_goal()
+    goal_index = goal_options.index(saved_goal) if saved_goal in goal_options else 0
+    goal = st.selectbox("Obiettivo principale", goal_options, index=goal_index)
+    if goal != saved_goal:
+        save_goal(goal)
     st.session_state['goal'] = goal
