@@ -97,11 +97,8 @@ gym-tracker/
 ├── metrics.py       # RTV computation, muscle scoring, period filtering, progression
 ├── llm.py           # Prompt building, LLM backend abstraction
 ├── launch.bat       # Windows one-click launcher
-└── data/            # Local data (gitignored)
-    ├── sessions.csv
-    ├── bodyweight.csv
-    ├── memory.txt
-    └── goal.txt
+├── data/            # Local data (gitignored)
+└── assets/          # Screenshots
 ```
 
 ## License
