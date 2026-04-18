@@ -125,3 +125,88 @@ REFERENCE_ATHLETE = {
     'Bicipiti':     1.5,   # trazioni + curl + lat machine
     'Core':         3.2,   # plank x4 + hanging x2 + abs x2 + russian + addominali
 }
+
+# ── Exercise metadata store (populated from data/exercises.json) ──────────────
+
+_EXERCISE_META: dict = {}
+
+# JSON muscle key → Italian MUSCLES name used throughout the app
+_MUSCLE_KEY_MAP = {
+    'chest':      'Petto',
+    'shoulders':  'Spalle',
+    'triceps':    'Tricipiti',
+    'back':       'Schiena',
+    'biceps':     'Bicipiti',
+    'quads':      'Quadricipiti',
+    'hamstrings': 'Femorali',
+    'core':       'Core',
+    'glutes':     'Femorali',    # closest existing group
+    'calves':     'Quadricipiti',  # matches existing Calf raise mapping
+}
+
+_DAY_ID_MAP = {'D1': 1, 'D2': 2, 'D3': 3, 'D4': 4}
+
+
+def get_exercise_meta(name: str) -> dict:
+    """Return the full exercises.json metadata dict for an exercise, or {} if not found."""
+    return _EXERCISE_META.get(name, {})
+
+
+try:
+    import json as _json
+    import os as _os
+
+    _exercises_path = 'data/exercises.json'
+    if _os.path.exists(_exercises_path):
+        with open(_exercises_path, 'r', encoding='utf-8') as _f:
+            _exercises_data = _json.load(_f)
+
+        for _ex in _exercises_data:
+            _name = _ex['name']
+            _EXERCISE_META[_name] = _ex
+
+            # Update EX_MUSCLES with mapped Italian muscle names (skip excluded)
+            if _ex.get('muscles') and _ex.get('type') != 'excluded':
+                _mapped = list(dict.fromkeys(
+                    _MUSCLE_KEY_MAP[k]
+                    for k in _ex['muscles']
+                    if k in _MUSCLE_KEY_MAP and _MUSCLE_KEY_MAP[k] in MUSCLES
+                ))
+                if _mapped:
+                    EX_MUSCLES[_name] = _mapped
+
+            # Update or append the exercise in each target day
+            for _did in _ex.get('day_ids', []):
+                _day_num = _DAY_ID_MAP.get(_did)
+                if _day_num is None:
+                    continue
+                _day = next((d for d in DAYS if d['id'] == _day_num), None)
+                if _day is None:
+                    continue
+
+                _existing = next(
+                    (e for e in _day['exercises'] if e['name'] == _name), None
+                )
+                if _existing is not None:
+                    _existing['type'] = _ex['type']
+                    if 'default' in _ex:
+                        _existing['default'] = _ex['default']
+                    elif _ex['type'] in ('bodyweight', 'excluded') and 'default' in _existing:
+                        del _existing['default']
+                    _existing['set_type'] = _ex.get('set_type', 'standard')
+                    _existing['no_amrap'] = _ex.get('no_amrap', False)
+                    _existing['variants'] = _ex.get('variants', [])
+                else:
+                    _new_entry: dict = {
+                        'name':     _name,
+                        'type':     _ex['type'],
+                        'set_type': _ex.get('set_type', 'standard'),
+                        'no_amrap': _ex.get('no_amrap', False),
+                        'variants': _ex.get('variants', []),
+                    }
+                    if 'default' in _ex:
+                        _new_entry['default'] = _ex['default']
+                    _day['exercises'].append(_new_entry)
+
+except Exception as _e:
+    print(f"[config] Warning: could not load data/exercises.json — {_e}")
