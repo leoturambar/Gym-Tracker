@@ -70,18 +70,26 @@ def compute_rtv(ex_type: str, value: float, bw: float,
 
 def compute_muscle_scores(df: pd.DataFrame, metric: str = 'freq') -> dict:
     """
-    Compute per-muscle scores from a session DataFrame.
+    Compute per-muscle scores from a session DataFrame, normalised by session count.
 
     metric:
-        'freq' → counts how many times each muscle is targeted (binary, EX_MUSCLES)
-        'rtv'  → sums volume-weighted RTV per muscle, scaled by fractional
-                 contribution weights from exercises.json via get_exercise_meta().
-                 Falls back to EX_MUSCLES equal-weight split when meta is absent.
+        'freq' → average number of times each muscle is targeted per session
+        'rtv'  → average volume-weighted RTV per session per muscle, scaled by
+                 fractional contribution weights from exercises.json via
+                 get_exercise_meta(). Falls back to EX_MUSCLES equal-weight
+                 split when meta is absent.
 
-    Returns dict {muscle: raw_value}, NOT normalised.
+    Returned values are **RTV per session** (or exercises per session for freq),
+    NOT cumulative totals. Dividing by session count makes scores from periods
+    of different lengths directly comparable on the radar chart.
     Requires a 'bodyweight' column in df for the 'rtv' metric.
     """
     scores = {m: 0.0 for m in MUSCLES}
+
+    if df.empty:
+        return scores
+
+    session_count = df['session_id'].nunique() if 'session_id' in df.columns else 1
 
     for _, row in df[~df['skipped']].iterrows():
         ex_name = row['exercise']
@@ -132,7 +140,8 @@ def compute_muscle_scores(df: pd.DataFrame, metric: str = 'freq') -> dict:
                 for m in binary:
                     scores[m] += rtv * equal_w
 
-    return scores
+    n = max(session_count, 1)
+    return {m: v / n for m, v in scores.items()}
 
 
 def normalize_scores(scores: dict) -> dict:
