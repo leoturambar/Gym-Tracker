@@ -3,18 +3,42 @@ from data_manager import get_bodyweight_on
 from metrics import compute_rtv
 from config import MUSCLES, EX_MUSCLES
 
-# ── Selezione backend LLM ─────────────────────────────────────────────────────
-# Cambia questo flag per switchare tra Claude e Ollama
-LLM_BACKEND = "ollama"  # "claude" oppure "ollama"
+# ── LLM backend selection ─────────────────────────────────────────────────────
+# Change this flag to switch between Claude and Ollama
+LLM_BACKEND = "ollama"  # "claude" or "ollama"
 
 OLLAMA_MODEL = "qwen2.5:14b"
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
+# ── System prompt ─────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """You are an expert strength and conditioning coach analyzing personal training data.
+You have access to structured session logs with loads, sets, reps, and a normalized
+training stress metric called RTV (Relative Training Volume).
+
+RTV is dimensionless and bodyweight-normalized. It incorporates load, sets, and reps
+relative to a 10-rep reference. It is the primary metric for comparing training stress
+across time and muscle groups — prefer it over raw kg values in your analysis.
+
+Calibration for RTV interpretation:
+- Isolation exercises (curls, tricep pushdowns, flies, leg extension): typical RTV
+  per session 0.10–0.40. Low absolute kg on these is normal and expected.
+- Compound movements (press, row, squat, hip thrust): typical RTV 0.40–1.20+.
+- Never interpret low absolute loads on isolation exercises as weak performance.
+  Always evaluate RTV values relative to exercise type.
+
+The athlete's persistent notes contain injuries and hard limitations — treat these
+as absolute constraints, never suggest movements that conflict with them.
+
+Be direct, specific, and base every comment on the actual numbers provided.
+Avoid generic advice. Maximum 500 words.
+Always end with: "If you can dodge a wrench, you can dodge a ball." """
+
 
 def get_client():
-    """Restituisce il client LLM appropriato in base al backend scelto."""
+    """Return the appropriate LLM client for the selected backend."""
     if LLM_BACKEND == "claude":
         import anthropic
         return anthropic.Anthropic()
@@ -22,40 +46,111 @@ def get_client():
         from openai import OpenAI
         return OpenAI(
             base_url=OLLAMA_BASE_URL,
-            api_key="ollama"  # valore richiesto ma non verificato da Ollama
+            api_key="ollama"  # required by the OpenAI client but not verified by Ollama
         )
 
 
-def call_llm(prompt: str) -> str:
-    """Chiama il backend LLM selezionato e restituisce la risposta."""
+def call_llm(prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str:
+    """Call the selected LLM backend and return the response text."""
     if LLM_BACKEND == "claude":
         client = get_client()
         message = client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=1024,
+            system=system_prompt,
             messages=[{"role": "user", "content": prompt}]
         )
         return message.content[0].text
     else:
         client = get_client()
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         response = client.chat.completions.create(
             model=OLLAMA_MODEL,
             max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}]
+            messages=messages,
         )
         return response.choices[0].message.content
 
 
-# ── Costruzione contesto ──────────────────────────────────────────────────────
+# ── Context builders ──────────────────────────────────────────────────────────
+
+def _safe_get(row, col, default=None):
+    """Read a DataFrame row field, returning default for NaN / missing."""
+    v = row.get(col, default)
+    if v is None:
+        return default
+    if isinstance(v, float) and pd.isna(v):
+        return default
+    return v
+
+
+def _format_exercise_line(row, bw: float) -> str | None:
+    """
+    Format one exercise row for the session history block.
+    Returns None for excluded-type exercises (they are silently skipped).
+    """
+    name = row['exercise']
+
+    if row['skipped']:
+        return f"  - {name}: SKIPPED"
+    if row['type'] == 'excluded':
+        return None
+
+    sets        = int(_safe_get(row, 'sets',        1))
+    reps        = int(_safe_get(row, 'reps',        10))
+    set_type    = str(_safe_get(row, 'set_type',    'standard'))
+    v2_raw      = _safe_get(row, 'value2',   None)
+    value2      = float(v2_raw) if v2_raw is not None else None
+    ra_raw      = _safe_get(row, 'reps_actual', None)
+    reps_actual = int(ra_raw) if ra_raw is not None else None
+
+    rtv = compute_rtv(
+        row['type'], row['value'], bw or 0,
+        sets=sets, reps=reps, set_type=set_type,
+        value2=value2, reps_actual=reps_actual,
+    )
+
+    if row['type'] == 'timed':
+        return f"  - {name}: {int(row['value'])}s (RTV: {rtv:.2f})"
+
+    # Base label: load × sets×reps
+    load = row['value']
+    ex_type = row['type']
+    if ex_type == 'bodyweight':
+        label = f"  - {name}: BW × {sets}×{reps}"
+    elif ex_type == 'weighted_bw':
+        sign = '+' if load >= 0 else ''
+        label = f"  - {name}: BW {sign}{load:.0f} kg × {sets}×{reps}"
+    else:
+        label = f"  - {name}: {load} kg × {sets}×{reps}"
+
+    # Append set_type context when it carries meaning
+    if set_type not in ('standard', 'none', ''):
+        label += f" → {set_type}"
+
+        if set_type == 'drop_inverse' and value2 is not None:
+            delta = value2 - load
+            extra_reps = reps_actual if reps_actual is not None else reps
+            label += f", final set +{delta:.0f} kg × {extra_reps} reps"
+
+        elif set_type == 'amrap' and reps_actual is not None:
+            label += f", final set {reps_actual} reps"
+
+    label += f" (RTV: {rtv:.2f})"
+    return label
+
 
 def build_session_summary(df: pd.DataFrame, n_sessions: int = 10) -> str:
     """
-    Costruisce un testo riassuntivo delle ultime N sessioni nel DataFrame fornito,
-    da passare come contesto al LLM.
-    df deve avere già la colonna 'bodyweight' (via enrich_with_bodyweight).
+    Build a text summary of the most recent N sessions for LLM context.
+    Requires a 'bodyweight' column in df (via enrich_with_bodyweight).
+    Includes sets, reps, set_type, and reps_actual where available.
     """
     if df.empty:
-        return "Nessuna sessione registrata ancora."
+        return "No sessions recorded yet."
 
     recent_ids = (
         df[['session_id', 'date']]
@@ -72,43 +167,38 @@ def build_session_summary(df: pd.DataFrame, n_sessions: int = 10) -> str:
         date = sess.iloc[0]['date']
         day_name = sess.iloc[0]['day_name']
         note = sess.iloc[0]['note'] if pd.notna(sess.iloc[0]['note']) else ''
-        bw = sess.iloc[0].get('bodyweight') if 'bodyweight' in sess.columns else get_bodyweight_on(date)
+        bw = (sess.iloc[0].get('bodyweight')
+              if 'bodyweight' in sess.columns
+              else get_bodyweight_on(date))
 
         lines.append(f"\n--- {date} | {day_name} ---")
         if bw:
-            lines.append(f"Peso corporeo: {bw} kg")
+            lines.append(f"Bodyweight: {bw} kg")
         if note:
             lines.append(f"Note: {note}")
 
         for _, row in sess.iterrows():
-            if row['skipped']:
-                lines.append(f"  - {row['exercise']}: SALTATO")
-            elif row['type'] == 'excluded':
-                continue
-            elif row['type'] == 'timed':
-                rtv = compute_rtv(row['type'], row['value'], bw or 0)
-                lines.append(f"  - {row['exercise']}: {int(row['value'])}s (RTV: {rtv:.2f})")
-            else:
-                rtv = compute_rtv(row['type'], row['value'], bw or 0)
-                lines.append(f"  - {row['exercise']}: {row['value']} kg (RTV: {rtv:.2f})")
+            line = _format_exercise_line(row, bw or 0)
+            if line is not None:
+                lines.append(line)
 
     return '\n'.join(lines)
 
 
 def build_muscle_summary(df_current, df_previous=None) -> str:
-    """Costruisce testo con distribuzione muscolare e confronto periodo."""
+    """Build text with muscle load distribution and period comparison."""
     from metrics import compute_muscle_scores, normalize_scores
 
     scores_cur = normalize_scores(compute_muscle_scores(df_current, 'rtv'))
 
-    lines = ["\nDistribuzione carico muscolare (normalizzata 0-1):"]
+    lines = ["\nMuscle load distribution (normalised 0-1):"]
     for m in MUSCLES:
         bar = '█' * int(scores_cur.get(m, 0) * 10)
         lines.append(f"  {m:<15} {scores_cur.get(m, 0):.2f}  {bar}")
 
     if df_previous is not None and not df_previous.empty:
         scores_prev = normalize_scores(compute_muscle_scores(df_previous, 'rtv'))
-        lines.append("\nVariazione rispetto al periodo precedente:")
+        lines.append("\nChange vs previous period:")
         for m in MUSCLES:
             delta = scores_cur.get(m, 0) - scores_prev.get(m, 0)
             arrow = '▲' if delta > 0.05 else ('▼' if delta < -0.05 else '=')
@@ -117,28 +207,47 @@ def build_muscle_summary(df_current, df_previous=None) -> str:
     return '\n'.join(lines)
 
 
-# ── Analisi principale ────────────────────────────────────────────────────────
+# ── Main analysis ─────────────────────────────────────────────────────────────
+
+_FOCUS_INSTRUCTIONS = {
+    'general': """\
+Identify the 2-3 most meaningful patterns in the recent session data. Comment on
+training consistency, load trends, and whether RTV distribution across muscle groups
+reflects the stated goal. Flag anything that looks like stagnation or imbalance.""",
+
+    'balance': """\
+Analyze the muscle load distribution in detail. Identify which groups are over or
+undertrained relative to the others and relative to the stated goal. Distinguish
+between structural imbalances (persistent across periods) and recent ones (last 1-2
+sessions). Suggest one concrete corrective action.""",
+
+    'progression': """\
+For each major exercise in the recent history, assess whether load and RTV are
+trending upward, flat, or declining. Flag any exercise where progress has stalled
+for 3 or more sessions. Note whether the athlete is progressing faster on compounds
+or isolations. Consider set_type context — an AMRAP set with increasing reps_actual
+over time is valid evidence of progression even without load increases.""",
+
+    'next_session': """\
+Based on the most recent session, the current muscle load distribution, and any
+limitations in the persistent notes, recommend a specific approach for the next
+training session. Name the day type. For each exercise, suggest whether to maintain,
+increase, or reduce load, and whether to push the final set to failure. Be concrete —
+give actual numbers where the data supports it.""",
+}
+
 
 def get_llm_analysis(user_profile: dict, df_current, df_previous=None,
                      focus: str = 'general') -> str:
     """
-    Genera analisi dell'allenamento via LLM.
+    Generate training analysis via LLM.
     focus: 'general' | 'balance' | 'progression' | 'next_session'
     """
     session_summary = build_session_summary(df_current)
     muscle_summary = build_muscle_summary(df_current, df_previous)
+    focus_instruction = _FOCUS_INSTRUCTIONS.get(focus, _FOCUS_INSTRUCTIONS['general'])
 
-    focus_instructions = {
-        'general':      "Provide a general analysis of training progress and patterns.",
-        'balance':      "Focus on muscular balance. Are any groups over or undertrained?",
-        'progression':  "Analyze load progression over time. Is there consistent progress?",
-        'next_session': "Suggest how to approach the next session based on the data.",
-    }
-
-    prompt = f"""You are an expert strength and conditioning coach. Analyze the following training data
-and provide concrete, actionable feedback based on the actual numbers.
-
-ATHLETE PROFILE:
+    prompt = f"""ATHLETE PROFILE:
 - Current body weight: {user_profile.get('bodyweight', 'not available')} kg
 - Goal: {user_profile.get('goal', 'not specified')}
 - Persistent notes (injuries, limitations, long-term goals): {user_profile.get('memory', 'none')}
@@ -149,10 +258,6 @@ RECENT SESSION HISTORY:
 {muscle_summary}
 
 ANALYSIS FOCUS:
-{focus_instructions.get(focus, focus_instructions['general'])}
-
-Be direct and specific. Base your comments on the actual numbers provided.
-Avoid generic advice. Maximum 500 words. Always end your response with this exact quote:
-"If you can dodge a wrench, you can dodge a ball." """
+{focus_instruction}"""
 
     return call_llm(prompt)
