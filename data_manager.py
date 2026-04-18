@@ -7,15 +7,21 @@ BW_FILE = 'data/bodyweight.csv'
 
 # ── Colonne del CSV sessioni ──────────────────────────────────────────────────
 SESSIONS_COLS = [
-    'session_id',   # timestamp unix, identificatore unico
-    'date',         # YYYY-MM-DD
-    'day_id',       # 1-4
-    'day_name',     # es. "Upper 1"
-    'exercise',     # nome esercizio
-    'type',         # weighted / bodyweight / weighted_bw / timed / excluded
-    'value',        # kg oppure secondi, a seconda del tipo
-    'skipped',      # True/False
-    'note',         # nota libera sulla sessione (stessa per tutti gli esercizi della sessione)
+    'session_id',    # timestamp unix, identificatore unico
+    'date',          # YYYY-MM-DD
+    'day_id',        # 1-4
+    'day_name',      # es. "Upper 1"
+    'exercise',      # nome esercizio
+    'variant',       # grip/handle variant (e.g. "neutral", "parallel"); "" if not applicable
+    'type',          # weighted / bodyweight / weighted_bw / timed / excluded
+    'sets',          # number of working sets performed (int, default 4)
+    'reps',          # target reps per set (int, default 10)
+    'value',         # kg oppure secondi, a seconda del tipo
+    'value2',        # second load for drop_inverse set type (float, nullable)
+    'set_type',      # standard / amrap / drop_inverse / fixed_plus / none
+    'reps_actual',   # actual reps on final set, only for amrap/drop_inverse (int, nullable)
+    'skipped',       # True/False
+    'note',          # nota libera sulla sessione (stessa per tutti gli esercizi della sessione)
 ]
 
 # ── Colonne del CSV peso corporeo ─────────────────────────────────────────────
@@ -71,21 +77,28 @@ def save_session(session_id: int, date_str: str, day_id: int, day_name: str,
                  exercises: list[dict], note: str = ''):
     """
     Salva una sessione di allenamento.
-    exercises: lista di dict con chiavi name, type, value, skipped
+    exercises: lista di dict con chiavi name, type, value, skipped e, opzionalmente,
+               variant, sets, reps, value2, set_type, reps_actual.
     """
     df = load_sessions()
     rows = []
     for ex in exercises:
         rows.append({
-            'session_id': session_id,
-            'date':       date_str,
-            'day_id':     day_id,
-            'day_name':   day_name,
-            'exercise':   ex['name'],
-            'type':       ex['type'],
-            'value':      ex['value'],
-            'skipped':    ex['skipped'],
-            'note':       note,
+            'session_id':  session_id,
+            'date':        date_str,
+            'day_id':      day_id,
+            'day_name':    day_name,
+            'exercise':    ex['name'],
+            'variant':     ex.get('variant', ''),
+            'type':        ex['type'],
+            'sets':        ex.get('sets', 4),
+            'reps':        ex.get('reps', 10),
+            'value':       ex['value'],
+            'value2':      ex.get('value2', None),
+            'set_type':    ex.get('set_type', 'standard'),
+            'reps_actual': ex.get('reps_actual', None),
+            'skipped':     ex['skipped'],
+            'note':        note,
         })
     new_rows = pd.DataFrame(rows)
     df = pd.concat([df, new_rows], ignore_index=True)
@@ -93,7 +106,22 @@ def save_session(session_id: int, date_str: str, day_id: int, day_name: str,
 
 
 def load_sessions() -> pd.DataFrame:
-    """Carica tutte le sessioni."""
+    """
+    Carica tutte le sessioni da sessions.csv.
+
+    Schema corrente (colonne in ordine):
+      session_id, date, day_id, day_name, exercise,
+      variant (str, "" if none),
+      type, sets (int, default 4), reps (int, default 10),
+      value (float, kg or seconds),
+      value2 (float|None, second load for drop_inverse),
+      set_type (standard|amrap|drop_inverse|fixed_plus|none),
+      reps_actual (int|None, final-set reps for amrap/drop_inverse),
+      skipped (bool), note (str)
+
+    Rows from older CSV files that lack the new columns are backfilled
+    with safe defaults so all callers can rely on the full schema.
+    """
     if not os.path.exists(SESSIONS_FILE):
         return pd.DataFrame(columns=SESSIONS_COLS)
     try:
@@ -102,6 +130,19 @@ def load_sessions() -> pd.DataFrame:
             return pd.DataFrame(columns=SESSIONS_COLS)
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         df['skipped'] = df['skipped'].astype(bool)
+        # backfill columns added after the initial schema
+        if 'variant' not in df.columns:
+            df['variant'] = ''
+        if 'sets' not in df.columns:
+            df['sets'] = 4
+        if 'reps' not in df.columns:
+            df['reps'] = 10
+        if 'value2' not in df.columns:
+            df['value2'] = None
+        if 'set_type' not in df.columns:
+            df['set_type'] = 'standard'
+        if 'reps_actual' not in df.columns:
+            df['reps_actual'] = None
         return df
     except pd.errors.EmptyDataError:
         return pd.DataFrame(columns=SESSIONS_COLS)
