@@ -276,7 +276,7 @@ with tab_radar:
         if metric == 'rtv' and df_all['bodyweight'].isna().all():
             st.warning("Imposta il peso corporeo nel tab Profilo per usare la metrica RTV.")
 
-        # calcolo scores — valori assoluti, nessuna normalizzazione
+        # calcolo scores — RTV per sessione (normalizzato per numero sessioni)
         if period == 'all':
             scores_a = compute_muscle_scores(df_all, metric)
             # schema come riferimento — conta esercizi per gruppo
@@ -298,17 +298,13 @@ with tab_radar:
                 'year':  ("Quest'anno",        'Anno scorso'),
             }[period]
 
-        # range assi — massimo tra tutti i valori mostrati
-        period_multiplier = {
-                'all':   1,
-                'week':  1,
-                'month': 4,
-                'year':  52,
-            }[period]
+        # Reference athlete: weekly values ÷ 4 sessions → per-session benchmark,
+        # flat across all period modes (matches the per-session normalisation above).
+        _ref_per_session = {m: v / 4.0 for m, v in REFERENCE_ATHLETE.items()}
 
         all_values = list(scores_a.values()) + list(scores_b.values())
         if show_reference:
-            all_values += [v * period_multiplier for v in REFERENCE_ATHLETE.values()]
+            all_values += list(_ref_per_session.values())
         max_val = max(all_values) if all_values else 1
         axis_max = max_val * 1.15  # 15% margine
 
@@ -336,8 +332,8 @@ with tab_radar:
 
         # poligono reference atleta (opzionale)
         if show_reference:
-            values_ref = [REFERENCE_ATHLETE.get(m, 0) * period_multiplier for m in MUSCLES] + \
-                        [REFERENCE_ATHLETE.get(MUSCLES[0], 0) * period_multiplier]
+            values_ref = [_ref_per_session.get(m, 0) for m in MUSCLES] + \
+                        [_ref_per_session.get(MUSCLES[0], 0)]
             fig.add_trace(go.Scatterpolar(
                 r=values_ref, theta=categories,
                 fill='toself', name='Atleta di riferimento',
@@ -368,8 +364,8 @@ with tab_radar:
 
         st.plotly_chart(fig, width='stretch')
 
-        # barre orizzontali con valori assoluti
-        st.subheader(f"{label_a} — {'RTV' if metric == 'rtv' else 'frequenza'}")
+        # barre orizzontali — valori per sessione
+        st.subheader(f"{label_a} — {'RTV / sessione' if metric == 'rtv' else 'esercizi / sessione'}")
         max_bar = max(scores_a.values()) if scores_a.values() else 1
         for m in MUSCLES:
             v = scores_a.get(m, 0)
