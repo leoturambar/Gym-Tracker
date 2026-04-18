@@ -449,7 +449,7 @@ with tab_profilo:
         bw_date = st.date_input("Data misurazione", value=pd.Timestamp.today(), key="bw_date")
         df_bw_current = load_bodyweight()
         last_bw = float(df_bw_current.sort_values('date', ascending=False).iloc[0]['bodyweight']) if not df_bw_current.empty else 75.0
-        bw_value = st.number_input("Peso (kg)", min_value=30.0, max_value=200.0, step=0.5, value=last_bw, key="bw_value")
+        bw_value = st.number_input("Peso (kg)", min_value=30.0, max_value=200.0, step=0.1, value=last_bw, key="bw_value")
         if st.button("💾 Salva peso", type="primary"):
             save_bodyweight(bw_value, str(bw_date))
             st.success(f"Peso {bw_value} kg salvato per il {bw_date}.")
