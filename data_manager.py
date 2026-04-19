@@ -170,6 +170,40 @@ def get_last_values(day_id: int) -> dict:
     df_last = df_day[df_day['session_id'] == last_session]
     return dict(zip(df_last['exercise'], df_last['value']))
 
+
+def get_last_session_meta(day_id: int) -> dict:
+    """
+    Returns {exercise_name: {sets, reps, set_type, variant, value2}} from the
+    most recent session for the given day. Used to pre-populate the extended
+    Log form fields. Returns {} if no prior session exists for that day.
+    """
+    df = load_sessions()
+    if df.empty:
+        return {}
+    df_day = df[(df['day_id'] == day_id) & (~df['skipped'])]
+    if df_day.empty:
+        return {}
+    last_session = df_day.sort_values('date', ascending=False).iloc[0]['session_id']
+    df_last = df_day[df_day['session_id'] == last_session]
+
+    result = {}
+    for _, row in df_last.iterrows():
+        def _get(col, default=None):
+            v = row.get(col, default)
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return default
+            return v
+
+        result[row['exercise']] = {
+            'sets':      int(_get('sets', 4)),
+            'reps':      int(_get('reps', 10)),
+            'set_type':  str(_get('set_type', 'standard')),
+            'variant':   str(_get('variant', '')),
+            'value2':    _get('value2', None),
+            'reps_actual': _get('reps_actual', None),
+        }
+    return result
+
 # ── Memoria ───────────────────────────────────────────────────────────────────
 
 MEMORY_FILE = 'data/memory.txt'

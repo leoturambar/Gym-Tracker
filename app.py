@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import time
-from config import DAYS, MUSCLES, REFERENCE_ATHLETE
+from config import DAYS, MUSCLES, REFERENCE_ATHLETE, get_exercise_meta
 from data_manager import (
     init_files, load_sessions, save_session, delete_session,
-    get_last_values, save_bodyweight, load_bodyweight,
+    get_last_values, get_last_session_meta, save_bodyweight, load_bodyweight,
     get_bodyweight_on, load_memory, save_memory, load_goal, save_goal
 )
 from metrics import (
@@ -45,6 +45,9 @@ with tab_log:
 
     # ── Pre-popola con ultimi valori ──────────────────────────────────────
     last_values = get_last_values(selected_day['id'])
+    last_session_meta = get_last_session_meta(selected_day['id'])
+
+    _ALL_SET_TYPES = ["standard", "amrap", "drop_inverse", "fixed_plus", "none"]
 
     st.divider()
 
@@ -53,42 +56,128 @@ with tab_log:
 
     exercise_inputs = {}
     for ex in selected_day['exercises']:
+        ex_name = ex['name']
+        meta = get_exercise_meta(ex_name)
+        last_meta = last_session_meta.get(ex_name, {})
+
+        # Row 1: name | load or caption | skip checkbox
         col1, col2, col3 = st.columns([3, 2, 1])
 
         with col1:
-            st.write(f"**{ex['name']}**")
+            st.write(f"**{ex_name}**")
 
         with col2:
             if ex['type'] == 'excluded':
                 st.caption("attivazione — non contato")
-                exercise_inputs[ex['name']] = {'value': 0, 'skipped': False}
-                continue
             elif ex['type'] == 'bodyweight':
                 st.caption("corpo libero")
-                default_val = 0
             elif ex['type'] == 'timed':
-                default_val = last_values.get(ex['name'], ex.get('default', 60))
-            else:
-                default_val = last_values.get(ex['name'], ex.get('default', 0))
-
-            label = "secondi" if ex['type'] == 'timed' else "kg"
-
-            if ex['type'] == 'bodyweight':
-                exercise_inputs[ex['name']] = {'value': 0, 'skipped': False}
-            else:
+                default_val = last_values.get(ex_name, ex.get('default', 60))
                 value = st.number_input(
-                    label,
-                    value=float(default_val),
-                    step=0.5 if ex['type'] != 'timed' else 5.0,
-                    key=f"val_{ex['name']}",
-                    label_visibility="collapsed"
+                    "secondi", value=float(default_val), step=5.0,
+                    key=f"val_{ex_name}", label_visibility="collapsed"
                 )
-                exercise_inputs[ex['name']] = {'value': value, 'skipped': False}
+            else:
+                default_val = last_values.get(ex_name, ex.get('default', 0))
+                value = st.number_input(
+                    "kg", value=float(default_val), step=0.5,
+                    key=f"val_{ex_name}", label_visibility="collapsed"
+                )
 
         with col3:
-            skipped = st.checkbox("salta", key=f"skip_{ex['name']}")
-            if ex['name'] in exercise_inputs:
-                exercise_inputs[ex['name']]['skipped'] = skipped
+            if ex['type'] != 'excluded':
+                skipped = st.checkbox("salta", key=f"skip_{ex_name}")
+            else:
+                skipped = False
+
+        # Excluded: record and advance to next exercise
+        if ex['type'] == 'excluded':
+            exercise_inputs[ex_name] = {'value': 0, 'skipped': False}
+            continue
+
+        # Timed: no sets/reps UI — store with sensible defaults and move on
+        if ex['type'] == 'timed':
+            exercise_inputs[ex_name] = {
+                'value': value, 'skipped': skipped,
+                'variant': '', 'sets': 1, 'reps': 10,
+                'set_type': meta.get('set_type', 'none') if meta else 'none',
+                'value2': None, 'reps_actual': None,
+            }
+            continue
+
+        # Bodyweight: load is always 0
+        if ex['type'] == 'bodyweight':
+            value = 0.0
+
+        # Row 2: sets | reps | variant
+        col_s, col_r, col_v = st.columns([1, 1, 2])
+        with col_s:
+            sets = st.number_input(
+                "Serie", min_value=1, max_value=10,
+                value=int(last_meta.get('sets', 4)),
+                step=1, key=f"sets_{ex_name}"
+            )
+        with col_r:
+            reps = st.number_input(
+                "Reps", min_value=1, max_value=50,
+                value=int(last_meta.get('reps', 10)),
+                step=1, key=f"reps_{ex_name}"
+            )
+        with col_v:
+            variants = meta.get('variants', []) if meta else []
+            if variants:
+                v_opts = [''] + variants
+                default_variant = last_meta.get('variant', '')
+                v_idx = v_opts.index(default_variant) if default_variant in v_opts else 0
+                variant = st.selectbox("Variante", v_opts, index=v_idx, key=f"var_{ex_name}")
+            else:
+                variant = ''
+
+        # Row 3: set type selector
+        no_amrap = meta.get('no_amrap', False) if meta else False
+        allowed_st = [t for t in _ALL_SET_TYPES
+                      if not (no_amrap and t in ('amrap', 'drop_inverse'))]
+        raw_default_st = last_meta.get('set_type',
+                         meta.get('set_type', 'standard') if meta else 'standard')
+        st_default = raw_default_st if raw_default_st in allowed_st else 'standard'
+
+        set_type = st.selectbox(
+            "Tipo serie", allowed_st,
+            index=allowed_st.index(st_default),
+            key=f"st_{ex_name}"
+        )
+        if no_amrap:
+            st.caption("⚠️ failure sets disabilitati per questo esercizio")
+
+        # Row 4 (conditional): second load for drop_inverse / fixed_plus
+        value2 = None
+        if set_type in ('drop_inverse', 'fixed_plus'):
+            lm_v2 = last_meta.get('value2')
+            v2_default = float(lm_v2) if lm_v2 is not None else (value + 5.0 if value else 5.0)
+            value2 = st.number_input(
+                "Carico finale (kg)", value=v2_default, step=0.5, key=f"v2_{ex_name}"
+            )
+
+        # Row 5 (conditional): actual reps on final set for amrap / drop_inverse
+        reps_actual = None
+        if set_type in ('amrap', 'drop_inverse'):
+            lm_ra = last_meta.get('reps_actual')
+            ra_default = int(lm_ra) if lm_ra is not None else int(reps)
+            reps_actual = st.number_input(
+                "Reps serie finale", min_value=1, max_value=100,
+                value=ra_default, step=1, key=f"ra_{ex_name}"
+            )
+
+        exercise_inputs[ex_name] = {
+            'value':       value,
+            'skipped':     skipped,
+            'variant':     variant,
+            'sets':        int(sets),
+            'reps':        int(reps),
+            'set_type':    set_type,
+            'value2':      value2,
+            'reps_actual': int(reps_actual) if reps_actual is not None else None,
+        }
 
     st.divider()
 
@@ -102,10 +191,16 @@ with tab_log:
         for ex in selected_day['exercises']:
             inp = exercise_inputs.get(ex['name'], {'value': 0, 'skipped': False})
             exercises.append({
-                'name':    ex['name'],
-                'type':    ex['type'],
-                'value':   inp['value'],
-                'skipped': inp['skipped'],
+                'name':        ex['name'],
+                'type':        ex['type'],
+                'value':       inp['value'],
+                'skipped':     inp['skipped'],
+                'variant':     inp.get('variant', ''),
+                'sets':        inp.get('sets', 4),
+                'reps':        inp.get('reps', 10),
+                'set_type':    inp.get('set_type', 'standard'),
+                'value2':      inp.get('value2', None),
+                'reps_actual': inp.get('reps_actual', None),
             })
         save_session(session_id, session_date_str,
                      selected_day['id'], selected_day['name'],
