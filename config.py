@@ -11,7 +11,7 @@ MUSCLES = ['Petto', 'Spalle', 'Tricipiti', 'Quadricipiti', 'Core', 'Femorali', '
 DAYS = [
     {
         'id': 1,
-        'name': 'Upper 1',
+        'name': 'Upper Push',
         'sub': 'Petto + Tricipiti',
         'exercises': [
             {'name': 'Band pull apart',    'type': 'excluded'},
@@ -27,7 +27,7 @@ DAYS = [
     },
     {
         'id': 2,
-        'name': 'Lower 1',
+        'name': 'Lower Quad',
         'sub': 'Quad + Core',
         'exercises': [
             {'name': 'Leg press (piedi medi)',  'type': 'weighted', 'default': 50},
@@ -44,7 +44,7 @@ DAYS = [
     },
     {
         'id': 3,
-        'name': 'Upper 2',
+        'name': 'Upper Pull',
         'sub': 'Schiena + Bicipiti',
         'exercises': [
             {'name': 'Scapular pull up',    'type': 'bodyweight'},
@@ -60,7 +60,7 @@ DAYS = [
     },
     {
         'id': 4,
-        'name': 'Lower 2',
+        'name': 'Lower Hip',
         'sub': 'Posteriore + Core',
         'exercises': [
             {'name': 'Leg curl',                     'type': 'weighted', 'default': 32},
