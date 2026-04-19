@@ -20,6 +20,8 @@ SESSIONS_COLS = [
     'value2',        # second load for drop_inverse set type (float, nullable)
     'set_type',      # standard / amrap / drop_inverse / fixed_plus / none
     'reps_actual',   # actual reps on final set, only for amrap/drop_inverse (int, nullable)
+    'value_drop',    # drop-set load for drop_inverse (float, nullable)
+    'reps_drop',     # reps at drop-set load for drop_inverse (int, nullable)
     'skipped',       # True/False
     'note',          # nota libera sulla sessione (stessa per tutti gli esercizi della sessione)
 ]
@@ -97,6 +99,8 @@ def save_session(session_id: int, date_str: str, day_id: int, day_name: str,
             'value2':      ex.get('value2', None),
             'set_type':    ex.get('set_type', 'standard'),
             'reps_actual': ex.get('reps_actual', None),
+            'value_drop':  ex.get('value_drop', None),
+            'reps_drop':   ex.get('reps_drop', None),
             'skipped':     ex['skipped'],
             'note':        note,
         })
@@ -143,6 +147,10 @@ def load_sessions() -> pd.DataFrame:
             df['set_type'] = 'standard'
         if 'reps_actual' not in df.columns:
             df['reps_actual'] = None
+        if 'value_drop' not in df.columns:
+            df['value_drop'] = None
+        if 'reps_drop' not in df.columns:
+            df['reps_drop'] = None
         return df
     except pd.errors.EmptyDataError:
         return pd.DataFrame(columns=SESSIONS_COLS)
@@ -199,8 +207,10 @@ def get_last_session_meta(day_id: int) -> dict:
             'reps':      int(_get('reps', 10)),
             'set_type':  str(_get('set_type', 'standard')),
             'variant':   str(_get('variant', '')),
-            'value2':    _get('value2', None),
+            'value2':      _get('value2', None),
             'reps_actual': _get('reps_actual', None),
+            'value_drop':  _get('value_drop', None),
+            'reps_drop':   _get('reps_drop', None),
         }
     return result
 
