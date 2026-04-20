@@ -118,9 +118,11 @@ def load_sessions() -> pd.DataFrame:
       variant (str, "" if none),
       type, sets (int, default 4), reps (int, default 10),
       value (float, kg or seconds),
-      value2 (float|None, second load for drop_inverse),
+      value2 (float|None, increased load for drop_inverse / fixed-plus final set),
       set_type (standard|amrap|drop_inverse|fixed_plus|none),
       reps_actual (int|None, final-set reps for amrap/drop_inverse),
+      value_drop (float|None, drop-set load for drop_inverse),
+      reps_drop (int|None, reps at drop-set load for drop_inverse),
       skipped (bool), note (str)
 
     Rows from older CSV files that lack the new columns are backfilled

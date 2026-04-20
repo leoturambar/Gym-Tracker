@@ -115,7 +115,14 @@ def _search_exrx_url(exercise_name: str) -> str | None:
 def _fetch_page_text(url: str, max_chars: int = 4000) -> str:
     import re
     try:
-        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        headers = {
+            "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection":      "keep-alive",
+        }
+        resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
         text = re.sub(r'<[^>]+>', ' ', resp.text)
         text = re.sub(r'\s+', ' ', text).strip()
@@ -287,9 +294,13 @@ with tab_allenamento:
                      if e.get('type') != 'excluded']
     day_id        = selected_day['id']
 
-    _extra_key  = f'_extra_slots_d{day_id}'
-    extra_count = st.session_state.get(_extra_key, 0)
-    total_slots = len(day_exercises) + extra_count
+    _extra_key     = f'_extra_slots_d{day_id}'
+    _removed_key   = f'_removed_slots_d{day_id}'
+    _confirm_key   = f'_remove_confirm_d{day_id}'
+    extra_count    = st.session_state.get(_extra_key, 0)
+    _removed_slots = st.session_state.get(_removed_key, set())
+    _confirm_slots = st.session_state.get(_confirm_key, set())
+    total_slots    = len(day_exercises) + extra_count
 
     exercise_inputs: dict = {}
 
@@ -304,9 +315,12 @@ with tab_allenamento:
         else:
             options = [''] + all_ex_names
 
+        if slot_idx in _removed_slots:
+            continue
+
         with st.container(border=True):
-            # ── Line 1: exercise selector | skip ─────────────────────────
-            l1c1, l1c2 = st.columns([5, 1])
+            # ── Line 1: exercise selector | skip | remove ─────────────────
+            l1c1, l1c2, l1c3 = st.columns([4, 1, 1])
             with l1c1:
                 selected_name = st.selectbox(
                     "Esercizio", options, index=0,
@@ -336,6 +350,35 @@ with tab_allenamento:
                             st.warning("Dati muscolari non trovati su ExRx.")
             with l1c2:
                 skipped = st.checkbox("Skip", key=f"skip_d{day_id}s{slot_idx}")
+            with l1c3:
+                if st.button("✕", key=f"rm_d{day_id}s{slot_idx}", help="Rimuovi dalla sessione"):
+                    if is_scheduled:
+                        _confirm_slots.add(slot_idx)
+                        st.session_state[_confirm_key] = _confirm_slots
+                    else:
+                        _removed_slots.add(slot_idx)
+                        st.session_state[_removed_key] = _removed_slots
+                    st.rerun()
+
+            if slot_idx in _confirm_slots:
+                st.warning(
+                    f"Rimuovere **{slot_name or 'questo esercizio'}** dalla sessione corrente? "
+                    "(Non viene eliminato dalla scheda.)"
+                )
+                conf_rm_c1, conf_rm_c2 = st.columns([1, 5])
+                with conf_rm_c1:
+                    if st.button("Conferma", key=f"rm_conf_d{day_id}s{slot_idx}", type="primary"):
+                        _removed_slots.add(slot_idx)
+                        _confirm_slots.discard(slot_idx)
+                        st.session_state[_removed_key] = _removed_slots
+                        st.session_state[_confirm_key] = _confirm_slots
+                        st.rerun()
+                with conf_rm_c2:
+                    if st.button("Annulla", key=f"rm_cancel_d{day_id}s{slot_idx}"):
+                        _confirm_slots.discard(slot_idx)
+                        st.session_state[_confirm_key] = _confirm_slots
+                        st.rerun()
+                continue
 
             eff_type  = ex_meta.get('type', slot_type)
             last_meta = last_session_meta.get(slot_name, {}) if slot_name else {}
@@ -543,7 +586,9 @@ with tab_allenamento:
         save_session(session_id, session_date_str,
                      selected_day['id'], selected_day['name'],
                      exercises, note)
-        st.session_state[_extra_key] = 0  # clear extra slots after save
+        st.session_state[_extra_key]   = 0
+        st.session_state[_removed_key] = set()
+        st.session_state[_confirm_key] = set()
         st.success("Sessione salvata!")
         time.sleep(1)
         st.rerun()
@@ -592,209 +637,210 @@ with tab_allenamento:
                     st.rerun()
 
 with tab_analisi:
-    sub_prog, sub_radar = st.tabs(["📈 Progressione", "🕸️ Bilancio muscolare"])
 
-    with sub_prog:
-        st.header("Progressione esercizi")
+    # ── Bilancio muscolare ────────────────────────────────────────────────
+    st.subheader("Bilancio muscolare")
 
-        weighted_exercises = [
-            ex['name']
-            for day in DAYS
-            for ex in day['exercises']
-            if ex['type'] in ('weighted', 'weighted_bw')
-        ]
-        weighted_exercises = sorted(set(weighted_exercises))
+    df_all = load_sessions()
 
-        selected_ex = st.selectbox("Esercizio", weighted_exercises)
+    if df_all.empty:
+        st.info("Nessuna sessione registrata ancora.")
+    else:
+        df_all = enrich_with_bodyweight(df_all)
 
-        df_prog = exercise_progression(selected_ex)
+        col1, col2 = st.columns(2)
+        with col1:
+            metric = st.radio(
+                "Metrica",
+                options=['rtv', 'freq'],
+                format_func=lambda x: 'Carico relativo (RTV)' if x == 'rtv' else 'Frequenza esercizi',
+                horizontal=True
+            )
+        with col2:
+            period = st.radio(
+                "Confronta",
+                options=['all', 'week', 'month', 'year'],
+                format_func=lambda x: {
+                    'all':   'vs Schema',
+                    'week':  'vs Sett. prec.',
+                    'month': 'vs Mese prec.',
+                    'year':  'vs Anno prec.'
+                }[x],
+                horizontal=True
+            )
 
-        if df_prog.empty:
-            st.info("Nessun dato per questo esercizio ancora.")
+        show_reference = st.checkbox("Mostra atleta di riferimento", value=False)
+
+        if metric == 'rtv' and df_all['bodyweight'].isna().all():
+            st.warning("Imposta il peso corporeo nel tab Profilo per usare la metrica RTV.")
+
+        if period == 'all':
+            scores_a = compute_muscle_scores(df_all, metric)
+            from config import EX_MUSCLES
+            schema_scores = {m: 0.0 for m in MUSCLES}
+            for day in DAYS:
+                for ex in day['exercises']:
+                    for m in EX_MUSCLES.get(ex['name'], []):
+                        schema_scores[m] += 1.0
+            scores_b = schema_scores
+            label_a, label_b = 'Reale (tutto)', 'Schema pianificato'
         else:
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Sessioni", len(df_prog))
-            with col2:
-                st.metric("Massimo", f"{df_prog['value'].max():.1f} kg")
-            with col3:
-                st.metric("Attuale", f"{df_prog['value'].iloc[-1]:.1f} kg")
-            with col4:
-                delta = df_prog['value'].iloc[-1] - df_prog['value'].iloc[0]
-                st.metric("Progresso", f"{delta:+.1f} kg")
+            df_cur, df_prev = filter_by_period(df_all, period)
+            scores_a = compute_muscle_scores(df_cur, metric)
+            scores_b = compute_muscle_scores(df_prev, metric)
+            label_a, label_b = {
+                'week':  ('Ultimi 7 giorni', '7 giorni precedenti'),
+                'month': ('Questo mese',      'Mese scorso'),
+                'year':  ("Quest'anno",        'Anno scorso'),
+            }[period]
 
-            st.divider()
+        _ref_per_session = {m: v / 4.0 for m, v in REFERENCE_ATHLETE.items()}
 
-            st.subheader("Carico (kg)")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
+        all_values = list(scores_a.values()) + list(scores_b.values())
+        if show_reference:
+            all_values += list(_ref_per_session.values())
+        max_val = max(all_values) if all_values else 1
+        axis_max = max_val * 1.15
+
+        categories = MUSCLES + [MUSCLES[0]]
+        values_a = [scores_a.get(m, 0) for m in MUSCLES] + [scores_a.get(MUSCLES[0], 0)]
+        values_b = [scores_b.get(m, 0) for m in MUSCLES] + [scores_b.get(MUSCLES[0], 0)]
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatterpolar(
+            r=values_b, theta=categories,
+            fill='toself', name=label_b,
+            line=dict(color='#5090ff', dash='dash', width=1.5),
+            fillcolor='rgba(80,144,255,0.1)'
+        ))
+
+        fig.add_trace(go.Scatterpolar(
+            r=values_a, theta=categories,
+            fill='toself', name=label_a,
+            line=dict(color='#00c878', width=2),
+            fillcolor='rgba(0,200,120,0.18)'
+        ))
+
+        if show_reference:
+            values_ref = [_ref_per_session.get(m, 0) for m in MUSCLES] + \
+                        [_ref_per_session.get(MUSCLES[0], 0)]
+            fig.add_trace(go.Scatterpolar(
+                r=values_ref, theta=categories,
+                fill='toself', name='Atleta di riferimento',
+                line=dict(color='#FF8C00', dash='dot', width=1.5),
+                fillcolor='rgba(255,140,0,0.07)'
+            ))
+
+        fig.update_layout(
+            polar=dict(
+                bgcolor='rgba(240,240,240,0.3)',
+                radialaxis=dict(
+                    visible=True,
+                    range=[0, axis_max],
+                    tickfont=dict(size=11, color='#666666'),
+                    gridcolor='rgba(150,150,150,0.4)',
+                    linecolor='rgba(150,150,150,0.4)',
+                ),
+                angularaxis=dict(
+                    tickfont=dict(size=13),
+                    gridcolor='rgba(150,150,150,0.3)',
+                    linecolor='rgba(150,150,150,0.4)',
+                )
+            ),
+            showlegend=True,
+            height=500,
+            margin=dict(l=40, r=40, t=40, b=40)
+        )
+
+        st.plotly_chart(fig, width='stretch')
+
+        st.subheader(f"{label_a} — {'RTV / sessione' if metric == 'rtv' else 'esercizi / sessione'}")
+        max_bar = max(scores_a.values()) if scores_a.values() else 1
+        for m in MUSCLES:
+            v = scores_a.get(m, 0)
+            pct = v / max_bar if max_bar > 0 else 0
+            st.progress(pct, text=f"{m}: {v:.2f}")
+
+    st.divider()
+
+    # ── Progressione ──────────────────────────────────────────────────────
+    st.subheader("Progressione")
+
+    weighted_exercises = [
+        ex['name']
+        for day in DAYS
+        for ex in day['exercises']
+        if ex['type'] in ('weighted', 'weighted_bw')
+    ]
+    weighted_exercises = sorted(set(weighted_exercises))
+
+    selected_ex = st.selectbox("Esercizio", weighted_exercises)
+
+    df_prog = exercise_progression(selected_ex)
+
+    if df_prog.empty:
+        st.info("Nessun dato per questo esercizio ancora.")
+    else:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Sessioni", len(df_prog))
+        with col2:
+            st.metric("Massimo", f"{df_prog['value'].max():.1f} kg")
+        with col3:
+            st.metric("Attuale", f"{df_prog['value'].iloc[-1]:.1f} kg")
+        with col4:
+            delta = df_prog['value'].iloc[-1] - df_prog['value'].iloc[0]
+            st.metric("Progresso", f"{delta:+.1f} kg")
+
+        st.divider()
+
+        st.subheader("Carico (kg)")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_prog['date'],
+            y=df_prog['value'],
+            mode='lines+markers',
+            name='kg',
+            line=dict(color='#00c878', width=2),
+            marker=dict(size=8)
+        ))
+        fig.update_layout(
+            yaxis=dict(
+                range=[
+                    df_prog['value'].min() * 0.85,
+                    df_prog['value'].max() * 1.15
+                ]
+            ),
+            margin=dict(l=0, r=0, t=20, b=0),
+            height=300,
+        )
+        st.plotly_chart(fig, width='stretch')
+
+        if df_prog['rtv'].sum() > 0:
+            st.subheader("RTV nel tempo")
+            fig_rtv = go.Figure()
+            fig_rtv.add_trace(go.Scatter(
                 x=df_prog['date'],
-                y=df_prog['value'],
+                y=df_prog['rtv'],
                 mode='lines+markers',
-                name='kg',
-                line=dict(color='#00c878', width=2),
+                name='RTV',
+                line=dict(color='#5090ff', width=2),
                 marker=dict(size=8)
             ))
-            fig.update_layout(
+            fig_rtv.update_layout(
                 yaxis=dict(
                     range=[
-                        df_prog['value'].min() * 0.85,
-                        df_prog['value'].max() * 1.15
+                        df_prog['rtv'].min() * 0.85,
+                        df_prog['rtv'].max() * 1.15
                     ]
                 ),
                 margin=dict(l=0, r=0, t=20, b=0),
                 height=300,
             )
-            st.plotly_chart(fig, width='stretch')
-
-            if df_prog['rtv'].sum() > 0:
-                st.subheader("RTV nel tempo")
-                fig_rtv = go.Figure()
-                fig_rtv.add_trace(go.Scatter(
-                    x=df_prog['date'],
-                    y=df_prog['rtv'],
-                    mode='lines+markers',
-                    name='RTV',
-                    line=dict(color='#5090ff', width=2),
-                    marker=dict(size=8)
-                ))
-                fig_rtv.update_layout(
-                    yaxis=dict(
-                        range=[
-                            df_prog['rtv'].min() * 0.85,
-                            df_prog['rtv'].max() * 1.15
-                        ]
-                    ),
-                    margin=dict(l=0, r=0, t=20, b=0),
-                    height=300,
-                )
-                st.plotly_chart(fig_rtv, width='stretch')
-            else:
-                st.caption("Imposta il peso corporeo nel tab Profilo per vedere il grafico RTV.")
-
-    with sub_radar:
-        st.header("Radar muscolare")
-
-        df_all = load_sessions()
-
-        if df_all.empty:
-            st.info("Nessuna sessione registrata ancora.")
+            st.plotly_chart(fig_rtv, width='stretch')
         else:
-            df_all = enrich_with_bodyweight(df_all)
-
-            col1, col2 = st.columns(2)
-            with col1:
-                metric = st.radio(
-                    "Metrica",
-                    options=['rtv', 'freq'],
-                    format_func=lambda x: 'Carico relativo (RTV)' if x == 'rtv' else 'Frequenza esercizi',
-                    horizontal=True
-                )
-            with col2:
-                period = st.radio(
-                    "Confronta",
-                    options=['all', 'week', 'month', 'year'],
-                    format_func=lambda x: {
-                        'all':   'vs Schema',
-                        'week':  'vs Sett. prec.',
-                        'month': 'vs Mese prec.',
-                        'year':  'vs Anno prec.'
-                    }[x],
-                    horizontal=True
-                )
-
-            show_reference = st.checkbox("Mostra atleta di riferimento", value=False)
-
-            if metric == 'rtv' and df_all['bodyweight'].isna().all():
-                st.warning("Imposta il peso corporeo nel tab Profilo per usare la metrica RTV.")
-
-            if period == 'all':
-                scores_a = compute_muscle_scores(df_all, metric)
-                from config import EX_MUSCLES
-                schema_scores = {m: 0.0 for m in MUSCLES}
-                for day in DAYS:
-                    for ex in day['exercises']:
-                        for m in EX_MUSCLES.get(ex['name'], []):
-                            schema_scores[m] += 1.0
-                scores_b = schema_scores
-                label_a, label_b = 'Reale (tutto)', 'Schema pianificato'
-            else:
-                df_cur, df_prev = filter_by_period(df_all, period)
-                scores_a = compute_muscle_scores(df_cur, metric)
-                scores_b = compute_muscle_scores(df_prev, metric)
-                label_a, label_b = {
-                    'week':  ('Ultimi 7 giorni', '7 giorni precedenti'),
-                    'month': ('Questo mese',      'Mese scorso'),
-                    'year':  ("Quest'anno",        'Anno scorso'),
-                }[period]
-
-            _ref_per_session = {m: v / 4.0 for m, v in REFERENCE_ATHLETE.items()}
-
-            all_values = list(scores_a.values()) + list(scores_b.values())
-            if show_reference:
-                all_values += list(_ref_per_session.values())
-            max_val = max(all_values) if all_values else 1
-            axis_max = max_val * 1.15
-
-            categories = MUSCLES + [MUSCLES[0]]
-            values_a = [scores_a.get(m, 0) for m in MUSCLES] + [scores_a.get(MUSCLES[0], 0)]
-            values_b = [scores_b.get(m, 0) for m in MUSCLES] + [scores_b.get(MUSCLES[0], 0)]
-
-            fig = go.Figure()
-
-            fig.add_trace(go.Scatterpolar(
-                r=values_b, theta=categories,
-                fill='toself', name=label_b,
-                line=dict(color='#5090ff', dash='dash', width=1.5),
-                fillcolor='rgba(80,144,255,0.1)'
-            ))
-
-            fig.add_trace(go.Scatterpolar(
-                r=values_a, theta=categories,
-                fill='toself', name=label_a,
-                line=dict(color='#00c878', width=2),
-                fillcolor='rgba(0,200,120,0.18)'
-            ))
-
-            if show_reference:
-                values_ref = [_ref_per_session.get(m, 0) for m in MUSCLES] + \
-                            [_ref_per_session.get(MUSCLES[0], 0)]
-                fig.add_trace(go.Scatterpolar(
-                    r=values_ref, theta=categories,
-                    fill='toself', name='Atleta di riferimento',
-                    line=dict(color='#FF8C00', dash='dot', width=1.5),
-                    fillcolor='rgba(255,140,0,0.07)'
-                ))
-
-            fig.update_layout(
-                polar=dict(
-                    bgcolor='rgba(240,240,240,0.3)',
-                    radialaxis=dict(
-                        visible=True,
-                        range=[0, axis_max],
-                        tickfont=dict(size=11, color='#666666'),
-                        gridcolor='rgba(150,150,150,0.4)',
-                        linecolor='rgba(150,150,150,0.4)',
-                    ),
-                    angularaxis=dict(
-                        tickfont=dict(size=13),
-                        gridcolor='rgba(150,150,150,0.3)',
-                        linecolor='rgba(150,150,150,0.4)',
-                    )
-                ),
-                showlegend=True,
-                height=500,
-                margin=dict(l=40, r=40, t=40, b=40)
-            )
-
-            st.plotly_chart(fig, width='stretch')
-
-            st.subheader(f"{label_a} — {'RTV / sessione' if metric == 'rtv' else 'esercizi / sessione'}")
-            max_bar = max(scores_a.values()) if scores_a.values() else 1
-            for m in MUSCLES:
-                v = scores_a.get(m, 0)
-                pct = v / max_bar if max_bar > 0 else 0
-                st.progress(pct, text=f"{m}: {v:.2f}")
+            st.caption("Imposta il peso corporeo nel tab Profilo per vedere il grafico RTV.")
 
 with tab_llm:
     st.header("Analisi AI")
@@ -1026,67 +1072,72 @@ with tab_profilo:
 
         st.divider()
 
-        # Section 2 — Arricchisci da ExRx (una tantum)
+        # Section 2 — Arricchisci da ExRx (manuale)
         with st.expander("Strumenti avanzati — ExRx enrichment"):
             st.write("**Arricchisci dati muscolari da ExRx**")
-            st.caption(
-                "Per ogni esercizio senza dati ExRx, cerca la pagina corrispondente e aggiorna "
-                "i pesi muscolari via AI. Operazione lenta (~2 min, una tantum)."
-            )
+            st.caption("Seleziona un esercizio, incolla l'URL ExRx corrispondente e avvia l'estrazione.")
 
-            if st.button("🔍 Avvia arricchimento"):
-                exercises_data = _load_exercises_json()
-                if not exercises_data:
-                    st.warning("Nessun esercizio in exercises.json.")
-                else:
-                    already     = sum(1 for e in exercises_data if e.get('source') == 'exrx')
-                    to_process  = [e for e in exercises_data if e.get('source') != 'exrx']
-                    updated, skipped = 0, 0
-                    prog   = st.progress(0.0)
-                    status = st.empty()
-                    log    = st.empty()
-                    lines: list[str] = []
+            _exrx_data = _load_exercises_json()
 
-                    for i, ex in enumerate(to_process):
-                        name = ex['name']
-                        prog.progress((i + 1) / max(len(to_process), 1))
-                        status.text(f"{name} ({i + 1}/{len(to_process)})")
+            if not _exrx_data:
+                st.info("Nessun esercizio in exercises.json.")
+            else:
+                _exrx_options = [
+                    f"{e['name']} ({e.get('source', 'manual')})"
+                    for e in _exrx_data
+                ]
+                _exrx_sel_idx = st.selectbox(
+                    "Esercizio", range(len(_exrx_options)),
+                    format_func=lambda i: _exrx_options[i],
+                    key="exrx_sel_idx"
+                )
+                _exrx_ex = _exrx_data[_exrx_sel_idx]
 
-                        url = _search_exrx_url(name)
-                        if not url:
-                            lines.append(f"⚠  {name}: URL non trovato")
-                            skipped += 1
-                            log.text('\n'.join(lines[-12:]))
-                            continue
+                _exrx_url_default = _exrx_ex.get('exrx_url', '')
+                _exrx_url = st.text_input(
+                    "ExRx URL", value=_exrx_url_default,
+                    placeholder="https://exrx.net/WeightExercises/...",
+                    key="exrx_url_input"
+                )
 
-                        page = _fetch_page_text(url)
-                        if not page:
-                            lines.append(f"⚠  {name}: pagina non scaricabile")
-                            skipped += 1
-                            log.text('\n'.join(lines[-12:]))
-                            continue
+                if st.button("🔍 Arricchisci", disabled=not _exrx_url):
+                    with st.spinner(f"Fetching {_exrx_url}…"):
+                        _page = _fetch_page_text(_exrx_url)
+                    if not _page:
+                        st.error("Impossibile scaricare la pagina. Verifica l'URL.")
+                    else:
+                        with st.spinner("Estrazione muscoli via AI…"):
+                            _muscles = _enrich_from_page(_exrx_ex['name'], _page)
+                        _total = sum(_muscles.values()) if _muscles else 0.0
+                        if _muscles and 0.95 <= _total <= 1.05:
+                            _exrx_ex['muscles']  = _muscles
+                            _exrx_ex['source']   = 'exrx'
+                            _exrx_ex['exrx_url'] = _exrx_url
+                            _save_exercises_json(_exrx_data)
+                            st.success(
+                                "Muscoli aggiornati: "
+                                + ", ".join(f"{k}={v:.2f}" for k, v in _muscles.items())
+                            )
+                            st.rerun()
+                        else:
+                            _raw = str(_muscles) if _muscles else "(nessun risultato)"
+                            st.error(
+                                f"Risultato non valido (somma={_total:.2f}). "
+                                f"Risposta grezza: {_raw}"
+                            )
 
-                        muscles = _enrich_from_page(name, page)
-                        total   = sum(muscles.values()) if muscles else 0.0
-                        if not muscles or abs(total - 1.0) > 0.35:
-                            lines.append(f"⚠  {name}: estrazione non valida (sum={total:.2f})")
-                            skipped += 1
-                            log.text('\n'.join(lines[-12:]))
-                            continue
-
-                        ex['muscles'] = muscles
-                        ex['source']  = 'exrx'
-                        updated += 1
-                        lines.append(f"✓  {name}: {', '.join(f'{k}={v:.2f}' for k, v in muscles.items())}")
-                        log.text('\n'.join(lines[-12:]))
-
-                    _save_exercises_json(exercises_data)
-                    prog.progress(1.0)
-                    status.text(
-                        f"Completato — {updated} aggiornati, {skipped} saltati, "
-                        f"{already} già con ExRx."
-                    )
-                    st.success(
-                        f"Arricchimento completato: {updated} aggiornati, "
-                        f"{skipped} saltati, {already} già presenti."
-                    )
+                st.divider()
+                st.caption("**Stato arricchimento**")
+                _status_rows = [
+                    {
+                        'Esercizio': e['name'],
+                        'Fonte':     e.get('source', '—'),
+                        'ExRx URL':  e.get('exrx_url', ''),
+                    }
+                    for e in _exrx_data
+                ]
+                st.dataframe(
+                    pd.DataFrame(_status_rows),
+                    hide_index=True,
+                    width='stretch',
+                )
