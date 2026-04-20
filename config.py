@@ -160,6 +160,9 @@ try:
     if _os.path.exists(_exercises_path):
         with open(_exercises_path, 'r', encoding='utf-8') as _f:
             _exercises_data = _json.load(_f)
+        # Support both old flat-array format and new {'exercises': [...], 'days': [...]} format
+        if isinstance(_exercises_data, dict):
+            _exercises_data = _exercises_data.get('exercises', [])
 
         for _ex in _exercises_data:
             _name = _ex['name']
