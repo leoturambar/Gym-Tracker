@@ -406,7 +406,7 @@ with tab_allenamento:
             c2a, c2b, c2c = st.columns([2, 1, 2])
 
             with c2a:
-                _sets_def = (int(last_meta.get('sets', ex_meta.get('sets', 4)))
+                _sets_def = max(1, int(last_meta.get('sets', ex_meta.get('sets', 4)))
                              if slot_name else 4)
                 sets = st.number_input(
                     "Serie", min_value=1, max_value=10, value=_sets_def,
@@ -424,7 +424,7 @@ with tab_allenamento:
                     )
                     reps = 0
                 else:
-                    _reps_def = (int(last_meta.get('reps', ex_meta.get('reps', 10)))
+                    _reps_def = max(1, int(last_meta.get('reps', ex_meta.get('reps', 10)))
                                  if slot_name else 10)
                     reps = st.number_input(
                         "Reps", min_value=1, max_value=50, value=_reps_def,
@@ -438,17 +438,17 @@ with tab_allenamento:
                     value = 0.0
                     st.empty()
                 elif eff_type == 'weighted_bw':
-                    _v_def = float(last_values.get(
+                    _v_def = max(0.0, float(last_values.get(
                         slot_name, slot_ex.get('default', 0) if slot_ex else 0
-                    ))
+                    )))
                     value = st.number_input(
                         "kg", value=_v_def, step=1.0,
                         key=f"wval_d{day_id}s{slot_idx}", label_visibility="collapsed"
                     )
                 else:
-                    _v_def = float(last_values.get(
+                    _v_def = max(0.0, float(last_values.get(
                         slot_name, slot_ex.get('default', 0) if slot_ex else 0
-                    ))
+                    )))
                     value = st.number_input(
                         "kg", value=_v_def, step=0.5,
                         key=f"wval_d{day_id}s{slot_idx}", label_visibility="collapsed"
@@ -482,7 +482,7 @@ with tab_allenamento:
 
             if set_type == 'amrap':
                 with c3b:
-                    _ra_def     = int(last_meta.get('reps_actual') or reps)
+                    _ra_def     = max(1, int(last_meta.get('reps_actual') or reps))
                     reps_actual = st.number_input(
                         "Reps finali", min_value=1, max_value=100,
                         value=_ra_def, step=1,
@@ -508,7 +508,7 @@ with tab_allenamento:
             elif set_type == 'drop_inverse':
                 # Sub-line 3a: set_type (Col A already) | reps_actual (Col B) | value2 (Col C)
                 with c3b:
-                    _ra_def     = int(last_meta.get('reps_actual') or reps)
+                    _ra_def     = max(1, int(last_meta.get('reps_actual') or reps))
                     reps_actual = st.number_input(
                         "Reps +peso", min_value=1, max_value=100,
                         value=_ra_def, step=1,
@@ -527,7 +527,7 @@ with tab_allenamento:
                     st.caption("Drop")
                 with c3bb:
                     _lrd      = last_meta.get('reps_drop')
-                    _rddef    = int(_lrd) if _lrd is not None else reps
+                    _rddef    = max(1, int(_lrd) if _lrd is not None else reps)
                     reps_drop = st.number_input(
                         "Reps drop", min_value=1, max_value=100,
                         value=_rddef, step=1,

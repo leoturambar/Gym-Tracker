@@ -23,7 +23,9 @@ def compute_rtv(ex_type: str, value: float, bw: float,
                 sets: int = 1, reps: int = 10,
                 set_type: str = 'standard',
                 value2: float | None = None,
-                reps_actual: int | None = None) -> float:
+                reps_actual: int | None = None,
+                value_drop: float | None = None,
+                reps_drop: int | None = None) -> float:
     """
     Compute volume-weighted RTV for one exercise entry.
 
@@ -35,8 +37,10 @@ def compute_rtv(ex_type: str, value: float, bw: float,
       excluded:    0.0
 
     Full entry: RTV_set × sets, except:
-      amrap:        uses reps_actual in place of reps when available
-      drop_inverse: base_load×sets×reps + value2×1×(reps_actual or reps)
+      amrap:        (sets-1) standard sets + 1 AMRAP set at reps_actual
+                    (final set is included in sets count, not added on top)
+      drop_inverse: (sets-1) base sets + 1 set at value2×(reps_actual or reps)
+                    + 1 drop set at value_drop×(reps_drop or reps) if available
                     falls back to standard if value2 is None
 
     Default sets=1 preserves backward compatibility for callers that
@@ -57,13 +61,20 @@ def compute_rtv(ex_type: str, value: float, bw: float,
             return ((bw + load) / bw * rep_factor * n_sets) if bw else 0.0
         return 0.0
 
-    effective_reps = reps_actual if (set_type == 'amrap' and reps_actual is not None) else reps
+    if set_type == 'amrap' and reps_actual is not None:
+        # Final set is included within sets count: (sets-1) standard + 1 AMRAP
+        return _single_pass(value, sets - 1, reps) + _single_pass(value, 1, reps_actual)
 
     if set_type == 'drop_inverse' and value2 is not None:
-        drop_reps = reps_actual if reps_actual is not None else reps
-        return _single_pass(value, sets, effective_reps) + _single_pass(value2, 1, drop_reps)
+        # Final set is included within sets count: (sets-1) standard + 1 up-set + 1 drop-set
+        up_reps = reps_actual if reps_actual is not None else reps
+        result = _single_pass(value, sets - 1, reps) + _single_pass(value2, 1, up_reps)
+        if value_drop is not None:
+            dr = reps_drop if reps_drop is not None else reps
+            result += _single_pass(value_drop, 1, dr)
+        return result
 
-    return _single_pass(value, sets, effective_reps)
+    return _single_pass(value, sets, reps)
 
 
 # ── Muscle scores da una lista di sessioni ────────────────────────────────────
@@ -116,11 +127,16 @@ def compute_muscle_scores(df: pd.DataFrame, metric: str = 'freq') -> dict:
         value2      = float(v2_raw) if v2_raw is not None else None
         ra_raw      = _get('reps_actual', None)
         reps_actual = int(ra_raw) if ra_raw is not None else None
+        vd_raw      = _get('value_drop', None)
+        value_drop  = float(vd_raw) if vd_raw is not None else None
+        rd_raw      = _get('reps_drop', None)
+        reps_drop   = int(rd_raw) if rd_raw is not None else None
 
         rtv = compute_rtv(
             row['type'], row['value'], bw,
             sets=sets, reps=reps, set_type=set_type,
             value2=value2, reps_actual=reps_actual,
+            value_drop=value_drop, reps_drop=reps_drop,
         )
 
         # Fractional muscle weights from exercises.json
@@ -224,8 +240,23 @@ def exercise_progression(exercise: str) -> pd.DataFrame:
     if df_ex.empty:
         return pd.DataFrame(columns=['date', 'value', 'rtv'])
 
-    df_ex['rtv'] = df_ex.apply(
-        lambda r: compute_rtv(r['type'], r['value'], r['bodyweight'] or 0), axis=1
-    )
+    def _row_rtv(r):
+        def _fget(col, default):
+            v = r.get(col, default)
+            return default if (v is None or (isinstance(v, float) and pd.isna(v))) else v
+        v2 = _fget('value2', None)
+        ra = _fget('reps_actual', None)
+        vd = _fget('value_drop', None)
+        rd = _fget('reps_drop', None)
+        return compute_rtv(
+            r['type'], r['value'], r['bodyweight'] or 0,
+            sets=int(_fget('sets', 1)), reps=int(_fget('reps', 10)),
+            set_type=str(_fget('set_type', 'standard')),
+            value2=float(v2) if v2 is not None else None,
+            reps_actual=int(ra) if ra is not None else None,
+            value_drop=float(vd) if vd is not None else None,
+            reps_drop=int(rd) if rd is not None else None,
+        )
+    df_ex['rtv'] = df_ex.apply(_row_rtv, axis=1)
 
     return df_ex[['date', 'value', 'rtv']].sort_values('date').reset_index(drop=True)
