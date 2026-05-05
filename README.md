@@ -2,7 +2,7 @@
 
 This started as a frustration with spreadsheets. I was tracking loads in Excel, manually computing whether I was getting stronger, and periodically realizing I had no idea whether my quad volume last month was actually more than the month before — or whether that meant anything relative to my bodyweight at the time. Gym Tracker is what replaced that. It's a Streamlit app that logs sessions, computes muscle load over time using a bodyweight-normalized metric I call RTV, and feeds the data to an LLM for coaching analysis. The interesting question wasn't "can I track workouts" — it was "what can a language model actually do when it has real, structured, personal data to work with?"
 
-<!-- SCREENSHOT: app overview showing all four tabs -->
+<!-- SCREENSHOT: app overview showing all three tabs -->
 
 ## Relative Training Volume
 
@@ -14,17 +14,17 @@ Muscle contribution is fractional, not binary. Each exercise has a muscles dicti
 
 Bodyweight measurements matter because they're in the denominator. `get_bodyweight_on()` in data_manager.py always retrieves the most recent measurement on or before a session's date — historical sessions are never retroactively recalculated with current weight. If you weighed 78 kg in February and 75 kg today, your February data reflects 78 kg.
 
-Period comparison scores are normalized by session count rather than calendar days. This prevents a month with 18 training days from looking undertrained compared to a month with 31, which was a real problem in earlier versions.
+Period comparison scores are normalized by calendar weeks (RTV per week), not session count. This makes all periods directly comparable regardless of length, and aligns with the reference athlete benchmark which is also expressed in weekly terms.
 
-<!-- SCREENSHOT: progression tab showing kg chart and RTV chart -->
+<!-- SCREENSHOT: Analisi tab showing radar chart and progression chart -->
 
 ## Training Intensity Model
 
 Beyond basic load tracking, the app models different intensity strategies on the final set of each exercise:
 
-**AMRAP** (As Many Reps As Possible) — the final set is taken to technical failure at the same weight as the working sets. The actual reps achieved are logged. Applied to exercises like hip thrust, calf raise, leg curl, and bicep curls. The logged rep count feeds directly into RTV and into 1RM estimation.
+**AMRAP** (As Many Reps As Possible) — the final set is taken to technical failure at the same weight as the working sets. The actual reps achieved are logged. The set count already includes the AMRAP set, so a logged set count of 4 means 3 straight sets plus 1 AMRAP. Applied to exercises like hip thrust, calf raise, leg curl, and bicep curls. The logged rep count feeds directly into RTV and into 1RM estimation.
 
-**Drop inverse** — the final set uses an increased weight taken to failure, then immediately drops to a lower weight and continues to failure. Two additional data points are logged: the increased weight with its reps, and the drop weight with its reps. Applied to incline chest press, pec fly, tricep cables, leg extension, and bicep curls.
+**Drop inverse** — the final set uses an increased weight taken to failure, then immediately drops to a lower weight and continues to failure. Two additional data points are logged: the increased weight with its reps, and the drop weight with its reps. The set count includes the up-set; the drop set is stored for the LLM context but excluded from RTV. Applied to incline chest press, pec fly, tricep cables, leg extension, and bicep curls.
 
 **Fixed plus** — the final set uses an increased weight but for a fixed, predetermined rep count. Not taken to failure. Applied to leg press variations.
 
@@ -34,25 +34,23 @@ Beyond basic load tracking, the app models different intensity strategies on the
 
 ## The App
 
-The app has four tabs.
+The app has three tabs.
 
-**Allenamento** is where sessions get entered and reviewed. At the top, you select the training day (Upper Push, Lower Quad, Upper Pull, or Lower Hip) and the date. Each exercise appears as a card with a consistent column layout: series count, reps, and weight on one line, with set type and final-set fields on the lines below — all vertically aligned so the grid never shifts. Timed exercises like planks show series and duration instead. Excluded warmup exercises don't appear. You can skip any exercise, remove cards from the session, and add extra exercises on the fly — including ones not yet in the database, which triggers an ExRx lookup to populate their muscle data. Below the log form, the full session history is accessible in the same tab: every past session in reverse chronological order, expandable to show all exercises with their loads.
+**Allenamento** is where sessions get entered and reviewed. At the top, you select the training day (Upper Push, Lower Quad, Upper Pull, or Lower Hip) and the date — all on one row alongside the rename and add-day buttons. Each exercise appears as a card with a consistent column layout: series count, reps, and weight on one line, with set type and final-set fields on the lines below — all vertically aligned so the grid never shifts. Timed exercises like planks show series and duration instead. Excluded warmup exercises don't appear. You can skip any exercise, remove cards from the session, and add extra exercises on the fly — including ones not yet in the database, which triggers an ExRx lookup to populate their muscle data. When you save a session, structural changes (exercises added or removed, set type changes) are automatically written back to exercises.json, keeping the exercise library in sync with how the program is actually being run. Below the log form, the full session history is accessible in the same tab: every past session in reverse chronological order, expandable to show all exercises with their loads.
 
 <!-- SCREENSHOT: Allenamento tab showing exercise cards and session history -->
 
-**Analisi** shows two views on a single scrollable page. The top half is the muscle balance radar — a polar chart with eight axes (chest, shoulders, triceps, back, biceps, quads, hamstrings, core) showing how training load is distributed across muscle groups. You choose a comparison mode: current period vs. previous period (week, month, or year), or actual training vs. the planned program schema. All values are normalized to RTV per session so different period lengths are directly comparable. An optional reference athlete overlay provides a benchmark. The bottom half tracks a single exercise over time — load in kg and RTV over time, with summary metrics for sessions logged, max load, most recent load, and total delta.
+**Analisi** shows everything on one scrollable page. The top half has two panels side by side: the muscle balance radar on the left (a polar chart with eight axes — chest, shoulders, triceps, back, biceps, quads, hamstrings, core) and a bar chart on the right showing the same data numerically. You choose a comparison period (week, month, or year); the current period is compared to the previous same-length period, and an auto-computed reference athlete overlay provides a benchmark. All values are in RTV per week, making different period lengths directly comparable. The bottom half has two panels side by side: load in kg over time (left) and RTV over time (right) for a single exercise you select. Below the charts, the AI coaching section lets you run one of four analysis modes without leaving the tab.
 
-<!-- SCREENSHOT: Analisi tab showing radar chart above and progression chart below -->
-
-**AI** sends your training data to a language model framed as a strength and conditioning coach. Four focus modes are available before generating. General analysis identifies patterns and consistency across recent sessions. Balance assessment pinpoints which muscle groups are over or undertrained, distinguishing structural imbalances from recent ones. Progression review assesses load trends per exercise, treating increasing AMRAP reps as valid evidence of progress even without load increases. Next session generates a concrete plan with specific load suggestions for each exercise. All modes receive the same context: bodyweight, training goal, persistent notes, the last 10 sessions with sets/reps/RTV per exercise, and the muscle load distribution with period-over-period deltas. The model is calibrated to interpret isolation exercise loads correctly — a 12 kg tricep cable is not weak performance.
-
-<!-- SCREENSHOT: AI tab showing a sample coaching output -->
+<!-- SCREENSHOT: Analisi tab showing radar and bar chart above, progression charts below, AI section at bottom -->
 
 **Profilo** manages the user context that feeds into AI analysis. Bodyweight is logged with dates (0.1 kg precision) and stored historically — the table shows every measurement and is used to look up the correct weight for any past session. A free-text persistent notes field carries injuries, chronic limitations, and long-term goals into every LLM prompt. A training goal selector covers hypertrophy, strength, muscular endurance, body recomposition, and maintenance. An exercise management section allows adding new exercises with LLM-assisted muscle group suggestion, and enriching existing exercises with muscle weights from ExRx.net by pasting the exercise URL.
 
 ## Exercise Database
 
-The exercise library lives in `data/exercises.json` rather than hardcoded configuration. Each entry carries the exercise name, type, day assignments, muscle contribution weights, default set type, safety flags, and ExRx URL if enriched. This means the library is a real data artifact — it grows as you add exercises, persists across code changes, and can be enriched with reference data without touching the codebase.
+The exercise library lives in `data/exercises.json` rather than hardcoded configuration. Each entry carries the exercise name, type, day assignments, muscle contribution weights, default set type, safety flags, a `reference_load` value, and ExRx URL if enriched. This means the library is a real data artifact — it grows as you add exercises, persists across code changes, and can be enriched with reference data without touching the codebase.
+
+`reference_load` is the representative load (kg or seconds) used to auto-compute the reference athlete benchmark. The reference athlete is not hardcoded anywhere — `get_reference_rtv_weekly()` in metrics.py derives it at runtime from exercise loads at 75 kg bodyweight, 4 sets, 10 reps, weighted by how often each exercise appears across training days.
 
 Muscle weights come from ExRx.net, the most comprehensive publicly available database of exercise biomechanics. The enrichment flow in the Profilo tab fetches the ExRx page for any exercise by URL, extracts primary and secondary muscle involvement using the LLM, and writes the result back to the database. Exercises enriched this way are flagged with `"source": "exrx"`.
 
@@ -95,8 +93,8 @@ On Windows, double-clicking `launch.bat` starts the app without a terminal.
 
 ```
 gym-tracker/
-├── app.py              # Streamlit UI, four-tab layout
-├── config.py           # Exercise library loader, muscle mapping, reference athlete
+├── app.py              # Streamlit UI, three-tab layout
+├── config.py           # Exercise library loader, muscle mapping
 ├── data_manager.py     # Session and bodyweight CSV read/write, schema defaults
 ├── metrics.py          # RTV computation, muscle scoring, period filtering, 1RM
 ├── llm.py              # Prompt building, LLM backend abstraction, ExRx extraction

@@ -10,8 +10,8 @@ structured AI integration with real, personal data.
 Python · Streamlit · Pandas · Plotly · Anthropic API (claude-sonnet) · Ollama
 
 ## Project structure
-- app.py — Streamlit UI, four-tab layout
-- config.py — exercise library loader, muscle mapping, reference athlete
+- app.py — Streamlit UI, three-tab layout
+- config.py — exercise library loader, muscle mapping (no hardcoded reference athlete)
 - data_manager.py — session and bodyweight read/write, schema defaults
 - metrics.py — RTV calculations, muscle scoring, period filtering, 1RM estimation
 - llm.py — Claude API calls, prompt building, session and muscle context formatting
@@ -22,9 +22,8 @@ Python · Streamlit · Pandas · Plotly · Anthropic API (claude-sonnet) · Olla
 
 ## Tab layout
 1. Allenamento — session logging (card-based) + session history (Storico)
-2. Analisi — muscle balance radar (top) + exercise progression charts (bottom)
-3. AI — four LLM coaching modes
-4. Profilo — bodyweight log, persistent notes, goal, exercise management tools
+2. Analisi — muscle balance radar + bar chart (top) + exercise progression charts (bottom) + AI coaching (bottom)
+3. Profilo — bodyweight log, persistent notes, goal, exercise management tools
 
 ## Key logic
 
@@ -36,28 +35,54 @@ The core metric. Implemented in metrics.py. Formula by exercise type:
 - timed: `duration / 120` (120s reference, sets not applied)
 - excluded: always 0.0
 
-For AMRAP set type: uses `reps_actual` instead of `reps` if available.
-For drop_inverse set type: computes RTV for base sets at base weight + one set at
-increased weight (value2/reps_actual); value_drop/reps_drop are stored but not
-included in the RTV calculation.
+For AMRAP set type: `sets` includes the AMRAP set; formula is `(sets-1)` standard
+sets + 1 set at `reps_actual`. The final AMRAP set is within the `sets` count, not
+added on top.
+For drop_inverse set type: `sets` includes the up-set; formula is `(sets-1)` base
+sets + 1 set at `value2 × (reps_actual or reps)`. The drop set (value_drop/reps_drop)
+is stored but explicitly excluded from RTV.
 
 Muscle contribution is fractional, not binary. Each exercise has a `muscles`
 dict in exercises.json mapping muscle group → weight (summing to 1.0).
 RTV is multiplied by these weights when accumulating per-muscle scores.
 
-Period comparison scores are normalized by session count (RTV per session),
-not raw totals — this prevents calendar-length bias between periods.
+Period comparison scores are normalized by calendar weeks (RTV per week),
+not session count — this makes different period lengths directly comparable
+and scales correctly with the reference athlete.
 
 Do not simplify or replace RTV without explicit instruction.
 
 ### Exercise library
 Defined in data/exercises.json. Loaded at startup by config.py, which merges
 with hardcoded fallback defaults. Schema per exercise:
-- name, type, day_ids, muscles (dict), set_type, no_amrap, variants, default, source, exrx_url
+- name, type, day_ids, muscles (dict), set_type, no_amrap, variants, default,
+  reference_load, source, exrx_url
 
 `get_exercise_meta(name)` in config.py returns the full metadata dict for any
 exercise. Used by app.py for UI pre-population and by metrics.py for fractional
 RTV per muscle.
+
+`reference_load` is the representative load (kg or seconds) for a 75 kg reference
+athlete. Used by `get_reference_rtv_weekly()` to auto-compute the reference athlete
+benchmark without any hardcoded per-muscle values. Set to 0 for bodyweight/excluded
+exercises and for weighted_bw exercises where 0 added weight is the reference point.
+
+### Reference athlete
+Auto-computed by `get_reference_rtv_weekly()` in metrics.py. Uses `reference_load`
+at 75 kg bodyweight, 4 sets, 10 reps, and `day_ids` to derive session frequency
+(exercises appearing in more days contribute proportionally more). Returns weekly
+RTV per muscle in Italian muscle names. There is no hardcoded `REFERENCE_ATHLETE`
+in config.py — the JSON is the single source of truth.
+
+### Routine sync on save
+When a session is saved, app.py compares the submitted exercises against the
+current day's exercise list and writes structural changes back to exercises.json:
+- Added exercises: append their `day_ids` entry for this day
+- Removed exercises: remove this day from their `day_ids`
+- Changed set_type: update `set_type` on the exercise record
+
+Built-in days (D1–D4) use `day_ids` on exercises; custom days have a
+`days[i].exercises` list and are handled separately.
 
 ### Session data model
 sessions.csv columns (one row per exercise per session):
@@ -69,9 +94,11 @@ Never add new columns without updating load_sessions() defaults.
 
 ### Set types
 - standard — straight sets, no special final set
-- amrap — final set to technical failure at same weight; logs reps_actual
+- amrap — final set to technical failure at same weight; logs reps_actual;
+  sets count includes the AMRAP set
 - drop_inverse — final set at increased weight (value2) to failure, then
-  immediate drop to lower weight (value_drop) to failure; logs reps_actual + reps_drop
+  immediate drop to lower weight (value_drop) to failure; logs reps_actual + reps_drop;
+  sets count includes the up-set; drop set excluded from RTV
 - fixed_plus — final set at increased weight (value2), fixed reps, not to failure
 - none — no intensity modifier (warmup exercises, timed holds)
 
@@ -85,6 +112,15 @@ Configurable via `LLM_BACKEND` flag in llm.py.
 - "ollama" — local Ollama via OpenAI-compatible endpoint, system message in messages array
 Both backends receive the same system prompt and user message structure.
 The prompt always ends with a Dodgeball quote. This is load-bearing for morale.
+
+### LLM session context format
+`_format_exercise_line()` in llm.py renders each exercise row for the LLM prompt.
+For set types that have a special final set, `base_sets = sets - 1` is used for
+the standard portion display, then the final set is appended:
+- amrap: `{load} kg × {base_sets}×{reps} + AMRAP {reps_actual} reps`
+- drop_inverse: `{load} kg × {base_sets}×{reps} + {value2} kg × {up_reps} reps → drop {value_drop} kg × {reps_drop} reps`
+- fixed_plus: `{load} kg × {base_sets}×{reps} + {value2} kg (final)`
+- unknown set types: appended as `[set_type]`
 
 ### AI coaching modes (llm.py)
 Four focus modes, each with a full paragraph of instructions:
