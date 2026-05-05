@@ -217,8 +217,8 @@ def _get_effective_days() -> list:
 
 # ── Tab structure ─────────────────────────────────────────────────────────────
 
-tab_allenamento, tab_analisi, tab_llm, tab_profilo = st.tabs([
-    "🏋️ Allenamento", "📊 Analisi", "🤖 AI", "👤 Profilo"
+tab_allenamento, tab_analisi, tab_profilo = st.tabs([
+    "🏋️ Allenamento", "📊 Analisi", "👤 Profilo"
 ])
 
 with tab_allenamento:
@@ -227,7 +227,7 @@ with tab_allenamento:
     effective_days = _get_effective_days()
     day_labels     = [f"D{d['id']} · {d['name']}" for d in effective_days]
 
-    ctrl_c1, ctrl_c2 = st.columns([3, 1])
+    ctrl_c1, ctrl_c2, ctrl_c3, ctrl_c4 = st.columns([4, 1, 1, 1])
     with ctrl_c1:
         sel_day_idx  = st.selectbox(
             "Giorno", range(len(effective_days)),
@@ -236,16 +236,9 @@ with tab_allenamento:
         )
         selected_day = effective_days[sel_day_idx]
     with ctrl_c2:
-        session_date     = st.date_input("Data", value=pd.Timestamp.today(),
-                                         label_visibility="collapsed")
-        session_date_str = str(session_date)
-
-    # Rename / add-day row
-    ren_c1, ren_c2, ren_c3 = st.columns([1, 3, 1])
-    with ren_c1:
         if st.button("✏️", key="btn_rename", help="Rinomina giorno"):
             st.session_state['_rename_day_id'] = selected_day['id']
-    with ren_c3:
+    with ctrl_c3:
         if st.button("➕ Giorno", key="btn_add_day"):
             _exf    = _load_ex_file()
             _new_id = max(d['id'] for d in effective_days) + 1
@@ -254,13 +247,16 @@ with tab_allenamento:
             )
             _save_ex_file(_exf)
             st.rerun()
+    with ctrl_c4:
+        session_date     = st.date_input("Data", value=pd.Timestamp.today(),
+                                         label_visibility="collapsed")
+        session_date_str = str(session_date)
 
     if st.session_state.get('_rename_day_id') == selected_day['id']:
-        with ren_c2:
-            new_day_name = st.text_input(
-                "Nuovo nome", value=selected_day['name'],
-                key="rename_input", label_visibility="collapsed"
-            )
+        new_day_name = st.text_input(
+            "Nuovo nome", value=selected_day['name'],
+            key="rename_input", label_visibility="collapsed"
+        )
         conf_c1, conf_c2 = st.columns([1, 5])
         with conf_c1:
             if st.button("✓", key="btn_confirm_rename"):
@@ -362,8 +358,8 @@ with tab_allenamento:
 
             if slot_idx in _confirm_slots:
                 st.warning(
-                    f"Rimuovere **{slot_name or 'questo esercizio'}** dalla sessione corrente? "
-                    "(Non viene eliminato dalla scheda.)"
+                    f"Rimuovere **{slot_name or 'questo esercizio'}** dalla sessione "
+                    "e dalla scheda del giorno?"
                 )
                 conf_rm_c1, conf_rm_c2 = st.columns([1, 5])
                 with conf_rm_c1:
@@ -578,6 +574,74 @@ with tab_allenamento:
         save_session(session_id, session_date_str,
                      selected_day['id'], selected_day['name'],
                      exercises, note)
+
+        # ── Routine sync ─────────────────────────────────────────────────
+        _builtin_ids = {d['id'] for d in DAYS}
+        _day_id_str  = f"D{selected_day['id']}"
+        _day_ex_set  = {ex['name'] for ex in day_exercises}
+        _submitted   = {
+            inp['name']: inp.get('set_type', 'standard')
+            for inp in exercise_inputs.values()
+            if inp and inp.get('name')
+        }
+        _sub_names  = set(_submitted.keys())
+        _added_rt   = _sub_names - _day_ex_set
+        _removed_rt = _day_ex_set - _sub_names
+        _changed_st = {
+            name: _submitted[name]
+            for name in _sub_names & _day_ex_set
+            if _submitted[name] != all_ex_map.get(name, {}).get('set_type', 'standard')
+        }
+        if _added_rt or _removed_rt or _changed_st:
+            _exf2 = _load_ex_file()
+            _exs2 = _exf2.get('exercises', [])
+            if selected_day['id'] in _builtin_ids:
+                for _n in _added_rt:
+                    _ei = next((i for i, e in enumerate(_exs2) if e['name'] == _n), None)
+                    if _ei is not None and _day_id_str not in _exs2[_ei].get('day_ids', []):
+                        _exs2[_ei].setdefault('day_ids', []).append(_day_id_str)
+                for _n in _removed_rt:
+                    _ei = next((i for i, e in enumerate(_exs2) if e['name'] == _n), None)
+                    if _ei is not None:
+                        try:
+                            _exs2[_ei]['day_ids'].remove(_day_id_str)
+                        except (KeyError, ValueError):
+                            pass
+            else:
+                _days_list2 = _exf2.setdefault('days', [])
+                _day_entry  = next(
+                    (d for d in _days_list2 if d.get('id') == selected_day['id']), None
+                )
+                if _day_entry is not None:
+                    _day_exs2 = _day_entry.setdefault('exercises', [])
+                    for _n in _added_rt:
+                        if not any(e['name'] == _n for e in _day_exs2):
+                            _em = all_ex_map.get(_n, {})
+                            _day_exs2.append({
+                                'name':     _n,
+                                'type':     _em.get('type', 'weighted'),
+                                'set_type': _submitted.get(_n, 'standard'),
+                                'no_amrap': _em.get('no_amrap', False),
+                                'variants': _em.get('variants', []),
+                            })
+                    _day_entry['exercises'] = [
+                        e for e in _day_exs2 if e['name'] not in _removed_rt
+                    ]
+            for _n, _new_st in _changed_st.items():
+                _ei = next((i for i, e in enumerate(_exs2) if e['name'] == _n), None)
+                if _ei is not None:
+                    _exs2[_ei]['set_type'] = _new_st
+            _exf2['exercises'] = _exs2
+            _save_ex_file(_exf2)
+            _rt_parts = []
+            if _added_rt:
+                _rt_parts.append(f"aggiunto {', '.join(sorted(_added_rt))}")
+            if _removed_rt:
+                _rt_parts.append(f"rimosso {', '.join(sorted(_removed_rt))}")
+            if _changed_st:
+                _rt_parts.append(f"set type modificato per {', '.join(sorted(_changed_st))}")
+            st.info(f"Routine aggiornata: {'; '.join(_rt_parts)}.")
+
         st.session_state[_extra_key]   = 0
         st.session_state[_removed_key] = set()
         st.session_state[_confirm_key] = set()
@@ -665,7 +729,6 @@ with tab_analisi:
         if metric == 'rtv' and df_all['bodyweight'].isna().all():
             st.warning("Imposta il peso corporeo nel tab Profilo per usare la metrica RTV.")
 
-        # Compute calendar-based period_weeks for per-week normalisation (3A)
         _today_n = pd.Timestamp.today().normalize()
         if period == 'week':
             cur_weeks  = 1.0
@@ -685,7 +748,6 @@ with tab_analisi:
         scores_a = compute_muscle_scores(df_cur, metric, period_weeks=cur_weeks)
         scores_b = compute_muscle_scores(df_prev, metric, period_weeks=prev_weeks)
 
-        # Reference athlete: scale weekly values to match the current period (3C)
         _ref_weekly = get_reference_rtv_weekly()
         _ref_scale  = 1.0 if period == 'week' else cur_weeks
         _ref_scaled = {m: v * _ref_scale for m, v in _ref_weekly.items()}
@@ -701,7 +763,6 @@ with tab_analisi:
         values_b = [scores_b.get(m, 0) for m in MUSCLES] + [scores_b.get(MUSCLES[0], 0)]
 
         fig = go.Figure()
-
         fig.add_trace(go.Scatterpolar(
             r=values_b, theta=categories,
             fill='toself', name='Precedente',
@@ -709,7 +770,6 @@ with tab_analisi:
             line=dict(color='#5090ff', dash='dash', width=1.5),
             fillcolor='rgba(80,144,255,0.1)'
         ))
-
         fig.add_trace(go.Scatterpolar(
             r=values_a, theta=categories,
             fill='toself', name='Corrente',
@@ -717,7 +777,6 @@ with tab_analisi:
             line=dict(color='#00c878', width=2),
             fillcolor='rgba(0,200,120,0.18)'
         ))
-
         if show_reference:
             values_ref = [_ref_scaled.get(m, 0) for m in MUSCLES] + \
                          [_ref_scaled.get(MUSCLES[0], 0)]
@@ -728,7 +787,6 @@ with tab_analisi:
                 line=dict(color='#FF8C00', dash='dot', width=1.5),
                 fillcolor='rgba(255,140,0,0.07)'
             ))
-
         fig.update_layout(
             polar=dict(
                 bgcolor='rgba(240,240,240,0.3)',
@@ -750,31 +808,31 @@ with tab_analisi:
             margin=dict(l=40, r=40, t=40, b=40)
         )
 
-        st.plotly_chart(fig, width='stretch')
-
-        st.subheader(f"Corrente — {'RTV / settimana' if metric == 'rtv' else 'esercizi / settimana'}")
-        max_bar = max(scores_a.values()) if scores_a.values() else 1
-        for m in MUSCLES:
-            v = scores_a.get(m, 0)
-            pct = v / max_bar if max_bar > 0 else 0
-            st.progress(pct, text=f"{m}: {v:.2f}")
+        # ── Radar (75%) + bar chart (25%) side by side ────────────────────
+        radar_col, bar_col = st.columns([3, 1])
+        with radar_col:
+            st.plotly_chart(fig, width='stretch')
+        with bar_col:
+            st.caption(f"{'RTV / sett.' if metric == 'rtv' else 'esercizi / sett.'}")
+            _max_bar = max(scores_a.values()) if any(scores_a.values()) else 1
+            for m in MUSCLES:
+                _v = scores_a.get(m, 0)
+                st.progress(_v / _max_bar if _max_bar > 0 else 0, text=f"{m}: {_v:.2f}")
 
     st.divider()
 
     # ── Progressione ──────────────────────────────────────────────────────
     st.subheader("Progressione")
 
-    weighted_exercises = [
+    weighted_exercises = sorted(set(
         ex['name']
         for day in DAYS
         for ex in day['exercises']
         if ex['type'] in ('weighted', 'weighted_bw')
-    ]
-    weighted_exercises = sorted(set(weighted_exercises))
+    ))
 
     selected_ex = st.selectbox("Esercizio", weighted_exercises)
-
-    df_prog = exercise_progression(selected_ex)
+    df_prog     = exercise_progression(selected_ex)
 
     if df_prog.empty:
         st.info("Nessun dato per questo esercizio ancora.")
@@ -787,68 +845,50 @@ with tab_analisi:
         with col3:
             st.metric("Attuale", f"{df_prog['value'].iloc[-1]:.1f} kg")
         with col4:
-            delta = df_prog['value'].iloc[-1] - df_prog['value'].iloc[0]
-            st.metric("Progresso", f"{delta:+.1f} kg")
+            st.metric("Progresso", f"{df_prog['value'].iloc[-1] - df_prog['value'].iloc[0]:+.1f} kg")
 
-        st.divider()
-
-        st.subheader("Carico (kg)")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df_prog['date'],
-            y=df_prog['value'],
-            mode='lines+markers',
-            name='kg',
-            line=dict(color='#00c878', width=2),
-            marker=dict(size=8)
-        ))
-        fig.update_layout(
-            yaxis=dict(
-                range=[
-                    df_prog['value'].min() * 0.85,
-                    df_prog['value'].max() * 1.15
-                ]
-            ),
-            margin=dict(l=0, r=0, t=20, b=0),
-            height=300,
-        )
-        st.plotly_chart(fig, width='stretch')
-
-        if df_prog['rtv'].sum() > 0:
-            st.subheader("RTV nel tempo")
-            fig_rtv = go.Figure()
-            fig_rtv.add_trace(go.Scatter(
-                x=df_prog['date'],
-                y=df_prog['rtv'],
-                mode='lines+markers',
-                name='RTV',
-                line=dict(color='#5090ff', width=2),
-                marker=dict(size=8)
+        # ── Load (left) + RTV (right) side by side ────────────────────────
+        prog_left, prog_right = st.columns([1, 1])
+        with prog_left:
+            st.subheader("Carico (kg)")
+            _fig_kg = go.Figure()
+            _fig_kg.add_trace(go.Scatter(
+                x=df_prog['date'], y=df_prog['value'],
+                mode='lines+markers', name='kg',
+                line=dict(color='#00c878', width=2), marker=dict(size=8)
             ))
-            fig_rtv.update_layout(
-                yaxis=dict(
-                    range=[
-                        df_prog['rtv'].min() * 0.85,
-                        df_prog['rtv'].max() * 1.15
-                    ]
-                ),
-                margin=dict(l=0, r=0, t=20, b=0),
-                height=300,
+            _fig_kg.update_layout(
+                yaxis=dict(range=[df_prog['value'].min() * 0.85,
+                                  df_prog['value'].max() * 1.15]),
+                margin=dict(l=0, r=0, t=20, b=0), height=300,
             )
-            st.plotly_chart(fig_rtv, width='stretch')
-        else:
-            st.caption("Imposta il peso corporeo nel tab Profilo per vedere il grafico RTV.")
+            st.plotly_chart(_fig_kg, width='stretch')
+        with prog_right:
+            if df_prog['rtv'].sum() > 0:
+                st.subheader("RTV nel tempo")
+                _fig_rtv = go.Figure()
+                _fig_rtv.add_trace(go.Scatter(
+                    x=df_prog['date'], y=df_prog['rtv'],
+                    mode='lines+markers', name='RTV',
+                    line=dict(color='#5090ff', width=2), marker=dict(size=8)
+                ))
+                _fig_rtv.update_layout(
+                    yaxis=dict(range=[df_prog['rtv'].min() * 0.85,
+                                      df_prog['rtv'].max() * 1.15]),
+                    margin=dict(l=0, r=0, t=20, b=0), height=300,
+                )
+                st.plotly_chart(_fig_rtv, width='stretch')
+            else:
+                st.caption("Imposta il peso corporeo nel tab Profilo per vedere il grafico RTV.")
 
-with tab_llm:
-    st.header("Analisi AI")
+    st.divider()
 
-    df_all = load_sessions()
+    # ── Analisi AI ────────────────────────────────────────────────────────
+    st.subheader("Analisi AI")
 
     if df_all.empty:
         st.info("Logga almeno una sessione per usare l'analisi AI.")
     else:
-        df_all = enrich_with_bodyweight(df_all)
-
         col1, col2 = st.columns(2)
         with col1:
             period_llm = st.radio(
@@ -876,13 +916,12 @@ with tab_llm:
             )
 
         if period_llm == 'all':
-            df_cur = df_all
-            df_prev = None
+            df_cur_ai  = df_all
+            df_prev_ai = None
         else:
-            df_cur, df_prev = filter_by_period(df_all, period_llm)
+            df_cur_ai, df_prev_ai = filter_by_period(df_all, period_llm)
 
-        # profilo utente
-        current_bw = get_bodyweight_on(str(pd.Timestamp.today().date()))
+        current_bw   = get_bodyweight_on(str(pd.Timestamp.today().date()))
         user_profile = {
             'bodyweight': current_bw,
             'goal':       st.session_state.get('goal', 'non specificato'),
@@ -894,7 +933,7 @@ with tab_llm:
         if st.button("🤖 Genera analisi", type="primary"):
             with st.spinner("Patches O'Houlihan sta analizzando i tuoi allenamenti…"):
                 try:
-                    analysis = get_llm_analysis(user_profile, df_cur, df_prev, focus)
+                    analysis = get_llm_analysis(user_profile, df_cur_ai, df_prev_ai, focus)
                     st.markdown(analysis)
                 except Exception as e:
                     st.error(f"Errore API: {e}")
