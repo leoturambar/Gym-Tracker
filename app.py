@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import time
-from config import DAYS, MUSCLES, REFERENCE_ATHLETE, get_exercise_meta
+from config import DAYS, MUSCLES, get_exercise_meta
 from data_manager import (
     init_files, load_sessions, save_session, delete_session,
     get_last_values, get_last_session_meta, save_bodyweight, load_bodyweight,
@@ -15,7 +15,7 @@ from data_manager import (
 from metrics import (
     compute_muscle_scores, normalize_scores,
     enrich_with_bodyweight, filter_by_period,
-    exercise_progression
+    exercise_progression, get_reference_rtv_weekly
 )
 from llm import get_llm_analysis, call_llm
 
@@ -406,8 +406,7 @@ with tab_allenamento:
             c2a, c2b, c2c = st.columns([2, 1, 2])
 
             with c2a:
-                _sets_def = max(1, int(last_meta.get('sets', ex_meta.get('sets', 4)))
-                             if slot_name else 4)
+                _sets_def = max(1, int((last_meta.get('sets') or ex_meta.get('sets') or 4) if slot_name else 4))
                 sets = st.number_input(
                     "Serie", min_value=1, max_value=10, value=_sets_def,
                     step=1, key=f"sets_d{day_id}s{slot_idx}", label_visibility="collapsed"
@@ -415,17 +414,14 @@ with tab_allenamento:
 
             with c2b:
                 if eff_type == 'timed':
-                    _dur_def = float(last_values.get(
-                        slot_name, slot_ex.get('default', 60) if slot_ex else 60
-                    ))
+                    _dur_def = float(last_values.get(slot_name) or (slot_ex.get('default', 60) if slot_ex else 60) or 60)
                     value = st.number_input(
                         "Tempo", value=_dur_def, step=5.0,
                         key=f"val_d{day_id}s{slot_idx}", label_visibility="collapsed"
                     )
                     reps = 0
                 else:
-                    _reps_def = max(1, int(last_meta.get('reps', ex_meta.get('reps', 10)))
-                                 if slot_name else 10)
+                    _reps_def = max(1, int((last_meta.get('reps') or ex_meta.get('reps') or 10) if slot_name else 10))
                     reps = st.number_input(
                         "Reps", min_value=1, max_value=50, value=_reps_def,
                         step=1, key=f"reps_d{day_id}s{slot_idx}", label_visibility="collapsed"
@@ -438,17 +434,13 @@ with tab_allenamento:
                     value = 0.0
                     st.empty()
                 elif eff_type == 'weighted_bw':
-                    _v_def = max(0.0, float(last_values.get(
-                        slot_name, slot_ex.get('default', 0) if slot_ex else 0
-                    )))
+                    _v_def = max(0.0, float(last_values.get(slot_name) or (slot_ex.get('default', 0) if slot_ex else 0) or 0))
                     value = st.number_input(
                         "kg", value=_v_def, step=1.0,
                         key=f"wval_d{day_id}s{slot_idx}", label_visibility="collapsed"
                     )
                 else:
-                    _v_def = max(0.0, float(last_values.get(
-                        slot_name, slot_ex.get('default', 0) if slot_ex else 0
-                    )))
+                    _v_def = max(0.0, float(last_values.get(slot_name) or (slot_ex.get('default', 0) if slot_ex else 0) or 0))
                     value = st.number_input(
                         "kg", value=_v_def, step=0.5,
                         key=f"wval_d{day_id}s{slot_idx}", label_visibility="collapsed"
@@ -659,9 +651,8 @@ with tab_analisi:
         with col2:
             period = st.radio(
                 "Confronta",
-                options=['all', 'week', 'month', 'year'],
+                options=['week', 'month', 'year'],
                 format_func=lambda x: {
-                    'all':   'vs Schema',
                     'week':  'vs Sett. prec.',
                     'month': 'vs Mese prec.',
                     'year':  'vs Anno prec.'
@@ -674,32 +665,35 @@ with tab_analisi:
         if metric == 'rtv' and df_all['bodyweight'].isna().all():
             st.warning("Imposta il peso corporeo nel tab Profilo per usare la metrica RTV.")
 
-        if period == 'all':
-            scores_a = compute_muscle_scores(df_all, metric)
-            from config import EX_MUSCLES
-            schema_scores = {m: 0.0 for m in MUSCLES}
-            for day in DAYS:
-                for ex in day['exercises']:
-                    for m in EX_MUSCLES.get(ex['name'], []):
-                        schema_scores[m] += 1.0
-            scores_b = schema_scores
-            label_a, label_b = 'Reale (tutto)', 'Schema pianificato'
-        else:
-            df_cur, df_prev = filter_by_period(df_all, period)
-            scores_a = compute_muscle_scores(df_cur, metric)
-            scores_b = compute_muscle_scores(df_prev, metric)
-            label_a, label_b = {
-                'week':  ('Ultimi 7 giorni', '7 giorni precedenti'),
-                'month': ('Questo mese',      'Mese scorso'),
-                'year':  ("Quest'anno",        'Anno scorso'),
-            }[period]
+        # Compute calendar-based period_weeks for per-week normalisation (3A)
+        _today_n = pd.Timestamp.today().normalize()
+        if period == 'week':
+            cur_weeks  = 1.0
+            prev_weeks = 1.0
+        elif period == 'month':
+            _start_cur_m  = _today_n.replace(day=1)
+            cur_weeks     = max(((_today_n - _start_cur_m).days + 1) / 7.0, 1 / 7)
+            _start_prev_m = (_start_cur_m - pd.Timedelta(days=1)).replace(day=1)
+            prev_weeks    = max((_start_cur_m - _start_prev_m).days / 7.0, 1 / 7)
+        else:  # year
+            _start_cur_y  = _today_n.replace(month=1, day=1)
+            cur_weeks     = max(((_today_n - _start_cur_y).days + 1) / 7.0, 1 / 7)
+            _start_prev_y = _start_cur_y.replace(year=_start_cur_y.year - 1)
+            prev_weeks    = max((_start_cur_y - _start_prev_y).days / 7.0, 1 / 7)
 
-        _ref_per_session = {m: v / 4.0 for m, v in REFERENCE_ATHLETE.items()}
+        df_cur, df_prev = filter_by_period(df_all, period)
+        scores_a = compute_muscle_scores(df_cur, metric, period_weeks=cur_weeks)
+        scores_b = compute_muscle_scores(df_prev, metric, period_weeks=prev_weeks)
+
+        # Reference athlete: scale weekly values to match the current period (3C)
+        _ref_weekly = get_reference_rtv_weekly()
+        _ref_scale  = 1.0 if period == 'week' else cur_weeks
+        _ref_scaled = {m: v * _ref_scale for m, v in _ref_weekly.items()}
 
         all_values = list(scores_a.values()) + list(scores_b.values())
         if show_reference:
-            all_values += list(_ref_per_session.values())
-        max_val = max(all_values) if all_values else 1
+            all_values += list(_ref_scaled.values())
+        max_val  = max(all_values) if all_values else 1
         axis_max = max_val * 1.15
 
         categories = MUSCLES + [MUSCLES[0]]
@@ -710,24 +704,27 @@ with tab_analisi:
 
         fig.add_trace(go.Scatterpolar(
             r=values_b, theta=categories,
-            fill='toself', name=label_b,
+            fill='toself', name='Precedente',
+            hovertemplate="%{r:.2f}<extra></extra>",
             line=dict(color='#5090ff', dash='dash', width=1.5),
             fillcolor='rgba(80,144,255,0.1)'
         ))
 
         fig.add_trace(go.Scatterpolar(
             r=values_a, theta=categories,
-            fill='toself', name=label_a,
+            fill='toself', name='Corrente',
+            hovertemplate="%{r:.2f}<extra></extra>",
             line=dict(color='#00c878', width=2),
             fillcolor='rgba(0,200,120,0.18)'
         ))
 
         if show_reference:
-            values_ref = [_ref_per_session.get(m, 0) for m in MUSCLES] + \
-                        [_ref_per_session.get(MUSCLES[0], 0)]
+            values_ref = [_ref_scaled.get(m, 0) for m in MUSCLES] + \
+                         [_ref_scaled.get(MUSCLES[0], 0)]
             fig.add_trace(go.Scatterpolar(
                 r=values_ref, theta=categories,
-                fill='toself', name='Atleta di riferimento',
+                fill='toself', name='Riferimento',
+                hovertemplate="%{r:.2f}<extra></extra>",
                 line=dict(color='#FF8C00', dash='dot', width=1.5),
                 fillcolor='rgba(255,140,0,0.07)'
             ))
@@ -755,7 +752,7 @@ with tab_analisi:
 
         st.plotly_chart(fig, width='stretch')
 
-        st.subheader(f"{label_a} — {'RTV / sessione' if metric == 'rtv' else 'esercizi / sessione'}")
+        st.subheader(f"Corrente — {'RTV / settimana' if metric == 'rtv' else 'esercizi / settimana'}")
         max_bar = max(scores_a.values()) if scores_a.values() else 1
         for m in MUSCLES:
             v = scores_a.get(m, 0)
