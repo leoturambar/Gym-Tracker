@@ -102,10 +102,14 @@ def _format_exercise_line(row, bw: float) -> str | None:
     sets        = int(_safe_get(row, 'sets',        1))
     reps        = int(_safe_get(row, 'reps',        10))
     set_type    = str(_safe_get(row, 'set_type',    'standard'))
-    v2_raw      = _safe_get(row, 'value2',   None)
+    v2_raw      = _safe_get(row, 'value2',      None)
     value2      = float(v2_raw) if v2_raw is not None else None
     ra_raw      = _safe_get(row, 'reps_actual', None)
     reps_actual = int(ra_raw) if ra_raw is not None else None
+    vd_raw      = _safe_get(row, 'value_drop',  None)
+    value_drop  = float(vd_raw) if vd_raw is not None else None
+    rd_raw      = _safe_get(row, 'reps_drop',   None)
+    reps_drop   = int(rd_raw) if rd_raw is not None else None
 
     rtv = compute_rtv(
         row['type'], row['value'], bw or 0,
@@ -116,28 +120,34 @@ def _format_exercise_line(row, bw: float) -> str | None:
     if row['type'] == 'timed':
         return f"  - {name}: {int(row['value'])}s (RTV: {rtv:.2f})"
 
-    # Base label: load × sets×reps
-    load = row['value']
+    load    = row['value']
     ex_type = row['type']
+
+    # For amrap/drop_inverse the special final set is counted within sets,
+    # so base_sets = sets - 1 are the plain straight sets.
+    base_sets = sets - 1 if set_type in ('amrap', 'drop_inverse') else sets
+
     if ex_type == 'bodyweight':
-        label = f"  - {name}: BW × {sets}×{reps}"
+        label = f"  - {name}: BW × {base_sets}×{reps}"
     elif ex_type == 'weighted_bw':
         sign = '+' if load >= 0 else ''
-        label = f"  - {name}: BW {sign}{load:.0f} kg × {sets}×{reps}"
+        label = f"  - {name}: BW {sign}{load:.0f} kg × {base_sets}×{reps}"
     else:
-        label = f"  - {name}: {load} kg × {sets}×{reps}"
+        label = f"  - {name}: {load} kg × {base_sets}×{reps}"
 
-    # Append set_type context when it carries meaning
-    if set_type not in ('standard', 'none', ''):
-        label += f" → {set_type}"
-
-        if set_type == 'drop_inverse' and value2 is not None:
-            delta = value2 - load
-            extra_reps = reps_actual if reps_actual is not None else reps
-            label += f", final set +{delta:.0f} kg × {extra_reps} reps"
-
-        elif set_type == 'amrap' and reps_actual is not None:
-            label += f", final set {reps_actual} reps"
+    # Append final-set detail for each special set type
+    if set_type == 'amrap' and reps_actual is not None:
+        label += f" + AMRAP {reps_actual} reps"
+    elif set_type == 'drop_inverse' and value2 is not None:
+        up_reps = reps_actual if reps_actual is not None else reps
+        label += f" + {value2:.0f} kg × {up_reps} reps"
+        if value_drop is not None:
+            dr = reps_drop if reps_drop is not None else reps
+            label += f" → drop {value_drop:.0f} kg × {dr} reps"
+    elif set_type == 'fixed_plus' and value2 is not None:
+        label += f" + {value2:.0f} kg (final)"
+    elif set_type not in ('standard', 'none', ''):
+        label += f" [{set_type}]"
 
     label += f" (RTV: {rtv:.2f})"
     return label
