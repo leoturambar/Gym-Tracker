@@ -7,7 +7,7 @@ from config import MUSCLES, EX_MUSCLES
 # Change this flag to switch between Claude and Ollama
 LLM_BACKEND = "ollama"  # "claude" or "ollama"
 
-OLLAMA_MODEL = "qwen2.5:14b"
+OLLAMA_MODEL = "qwen3.5:9b" #"qwen2.5:14b"
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
@@ -62,17 +62,18 @@ def call_llm(prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str:
         )
         return message.content[0].text
     else:
-        client = get_client()
+        from ollama import Client
+        client = Client(host="http://localhost:11434")
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-        response = client.chat.completions.create(
+        resp = client.chat(
             model=OLLAMA_MODEL,
-            max_tokens=1024,
             messages=messages,
+            think=False
         )
-        return response.choices[0].message.content
+        return resp.message.content
 
 
 # ── Context builders ──────────────────────────────────────────────────────────
