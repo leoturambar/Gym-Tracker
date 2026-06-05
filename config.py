@@ -15,8 +15,8 @@ DAYS = [
         'sub': 'Petto + Tricipiti',
         'exercises': [
             {'name': 'Band pull apart',             'type': 'excluded'},
-            {'name': 'Face pull cavo',              'type': 'weighted',    'default': 35},
-            {'name': 'Incline chest press manubri', 'type': 'weighted',    'default': 12},
+            {'name': 'Face pull cavo',              'type': 'weighted',    'default': 15},
+            {'name': 'Incline chest press manubri', 'type': 'weighted',    'default': 20},
             {'name': 'Chest press',                 'type': 'weighted',    'default': 40},
             {'name': 'Shoulder press',              'type': 'weighted',    'default': 25},
             {'name': 'Dips',                        'type': 'weighted_bw', 'default': -10},
@@ -24,6 +24,8 @@ DAYS = [
             {'name': 'Lat machine presa larga',     'type': 'weighted',    'default': 35},
             {'name': 'Delts machine',               'type': 'weighted',    'default': 15},
             {'name': 'Tricipiti ai cavi',           'type': 'weighted',    'default': 10},
+            {'name': 'Curl bicipiti cavo',          'type': 'weighted',    'default': 15},  # + pull component
+            {'name': 'Hollow body hold',            'type': 'timed',       'default': 45},  # +
             {'name': 'Plank',                       'type': 'timed',       'default': 60},
         ]
     },
@@ -32,12 +34,14 @@ DAYS = [
         'name': 'Lower Quad',
         'sub': 'Quad dominant',
         'exercises': [
-            {'name': 'Leg press piedi medi',             'type': 'weighted', 'default': 50},
-            {'name': 'Hip thrust',                       'type': 'weighted', 'default': 30},
-            {'name': 'Leg extension',                    'type': 'weighted', 'default': 20},
-            {'name': 'Adduttori macchina',               'type': 'weighted', 'default': 35},
-            {'name': 'Abduttori macchina',               'type': 'weighted', 'default': 35},
-            {'name': 'Calf raise',                       'type': 'weighted', 'default': 35},
+            {'name': 'Leg press piedi medi',             'type': 'weighted',    'default': 50},
+            {'name': 'Hip thrust',                       'type': 'weighted',    'default': 50},
+            {'name': 'Leg extension',                    'type': 'weighted',    'default': 20},
+            {'name': 'Glute kickback',                   'type': 'weighted',    'default': 35},  # +
+            {'name': 'Adduttori macchina',               'type': 'weighted',    'default': 35},
+            {'name': 'Abduttori macchina',               'type': 'weighted',    'default': 35},
+            {'name': 'Calf raise',                       'type': 'weighted',    'default': 35},
+            {'name': 'Pallof press',                     'type': 'weighted',    'default': 13},  # +
             {'name': 'Addominali laterali panca romana', 'type': 'weighted_bw', 'default': 5},
             {'name': 'Hanging leg raise',                'type': 'bodyweight'},
         ]
@@ -51,7 +55,7 @@ DAYS = [
             {'name': 'Trazioni assistite',                        'type': 'weighted_bw', 'default': -10},
             {'name': 'Rematore',                                  'type': 'weighted',    'default': 35},
             {'name': 'Pulley basso',                              'type': 'weighted',    'default': 35},
-            {'name': 'Face pull cavo',                            'type': 'weighted',    'default': 35},
+            {'name': 'Face pull cavo',                            'type': 'weighted',    'default': 15},
             {'name': 'Curl bicipiti panca inclinata 60° manubri', 'type': 'weighted',    'default': 15},
             {'name': 'Tricipiti ai cavi',                         'type': 'weighted',    'default': 10},
             {'name': 'Plank',                                     'type': 'timed',       'default': 120},
@@ -61,16 +65,18 @@ DAYS = [
     {
         'id': 4,
         'name': 'Lower Hip',
-        'sub': 'Harmstring dominant',
+        'sub': 'Hamstring dominant',  # fixed typo
         'exercises': [
             {'name': 'Leg curl',                      'type': 'weighted',    'default': 36},
             {'name': 'Leg press piedi alti e larghi', 'type': 'weighted',    'default': 60},
-            {'name': 'Russian twists',                'type': 'weighted_bw', 'default': 12},
             {'name': 'Iperestensioni lombari',        'type': 'weighted_bw', 'default': 15},
+            {'name': 'Romanian deadlift',             'type': 'weighted',    'default': 12},  # +
             {'name': 'Adduttori macchina',            'type': 'weighted',    'default': 35},
             {'name': 'Abduttori macchina',            'type': 'weighted',    'default': 35},
             {'name': 'Calf raise',                    'type': 'weighted',    'default': 35},
+            {'name': 'Russian twists',                'type': 'weighted_bw', 'default': 12},
             {'name': 'Abs machine',                   'type': 'weighted',    'default': 32},
+            {'name': 'Abs wheel',                     'type': 'bodyweight'},                   # +
             {'name': 'Hanging knee raise',            'type': 'bodyweight'},
         ]
     },

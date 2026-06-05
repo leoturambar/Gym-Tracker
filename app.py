@@ -10,7 +10,12 @@ from config import DAYS, MUSCLES, get_exercise_meta
 from data_manager import (
     init_files, load_sessions, save_session, delete_session,
     get_last_values, get_last_session_meta, save_bodyweight, load_bodyweight,
-    get_bodyweight_on, load_memory, save_memory, load_goal, save_goal
+    get_bodyweight_on, load_memory, save_memory, load_goal, save_goal,
+    get_session_dates, import_hevy_rows,
+)
+from hevy_importer import (
+    parse_hevy_csv, group_into_sessions, find_overlap,
+    compare_session, sessions_to_csv_rows, load_exercise_map,
 )
 from metrics import (
     compute_muscle_scores, normalize_scores,
@@ -1177,3 +1182,112 @@ with tab_profilo:
                     hide_index=True,
                     width='stretch',
                 )
+
+    st.divider()
+
+    # ── Importa da Hevy ───────────────────────────────────────────────────
+    with st.expander("📥 Importa da Hevy"):
+        _hevy_file = st.file_uploader(
+            "Carica CSV Hevy", type="csv", key="hevy_uploader"
+        )
+
+        if _hevy_file is not None:
+            try:
+                _df_raw      = parse_hevy_csv(_hevy_file)
+                _sessions    = group_into_sessions(_df_raw)
+                _ex_dates    = get_session_dates()
+                _exist_sess, _new_sess = find_overlap(_sessions, _ex_dates)
+
+                _X = len(_sessions)
+                _Y = len(_new_sess)
+                _Z = len(_exist_sess)
+
+                st.markdown(
+                    f"**{_X} sessioni trovate · {_Y} nuove · {_Z} già presenti**"
+                )
+
+                # ── Step 2: session overview ──────────────────────────────
+                _ov_left, _ov_right = st.columns(2)
+
+                with _ov_left:
+                    st.markdown(f"**:green[Nuove ({_Y})]**")
+                    for _s in _new_sess:
+                        _n_ex = len({
+                            e['app_name']
+                            for e in _s['exercises']
+                            if e['app_name'] and not e['is_warmup']
+                        })
+                        st.write(f"• {_s['date']} · {_s['day_id']} · {_n_ex} esercizi")
+
+                # Load existing session rows once for all comparisons
+                _app_df = load_sessions()
+
+                with _ov_right:
+                    st.markdown(f"**:orange[Già presenti ({_Z})]**")
+                    for _s in _exist_sess:
+                        _app_rows = (
+                            _app_df[_app_df['date'] == _s['date']]
+                            if not _app_df.empty else pd.DataFrame()
+                        )
+                        _cmp = compare_session(_s, _app_rows)
+                        _badge = "✓" if _cmp['is_clean'] else "⚠"
+                        st.write(f"{_badge} {_s['date']} · {_s['day_id']}")
+
+                # ── Step 3: comparison detail for sessions with differences ─
+                for _s in _exist_sess:
+                    _app_rows = (
+                        _app_df[_app_df['date'] == _s['date']]
+                        if not _app_df.empty else pd.DataFrame()
+                    )
+                    _cmp = compare_session(_s, _app_rows)
+                    if _cmp['is_clean']:
+                        continue
+                    _n_diffs = (
+                        len(_cmp['only_in_hevy'])
+                        + len(_cmp['only_in_app'])
+                        + len(_cmp['load_diffs'])
+                    )
+                    with st.expander(
+                        f"{_s['date']} {_s['day_id']} — {_n_diffs} differenze",
+                        expanded=False,
+                    ):
+                        if _cmp['only_in_hevy']:
+                            st.write("**Solo in Hevy**")
+                            for _nm in _cmp['only_in_hevy']:
+                                st.write(f"  • {_nm}")
+                        if _cmp['only_in_app']:
+                            st.write("**Solo nell'app**")
+                            for _nm in _cmp['only_in_app']:
+                                st.write(f"  • {_nm}")
+                        if _cmp['load_diffs']:
+                            st.write("**Carichi diversi**")
+                            st.dataframe(
+                                pd.DataFrame([
+                                    {
+                                        'Esercizio': d['exercise'],
+                                        'App':       d['app_value'],
+                                        'Hevy':      d['hevy_value'],
+                                    }
+                                    for d in _cmp['load_diffs']
+                                ]),
+                                hide_index=True,
+                            )
+
+                # ── Step 4: import button ──────────────────────────────────
+                if _Y > 0:
+                    if st.button(
+                        f"Importa {_Y} sessioni nuove",
+                        type="primary",
+                        key="hevy_import_btn",
+                    ):
+                        _rows_df  = sessions_to_csv_rows(_new_sess, load_exercise_map())
+                        _n_written = import_hevy_rows(_rows_df)
+                        st.success(
+                            f"Importate {_n_written} righe. "
+                            "Ricarica l'app per aggiornare i grafici."
+                        )
+                elif _Z > 0:
+                    st.info("Tutte le sessioni sono già presenti.")
+
+            except Exception as _hevy_err:
+                st.error(f"Errore durante il parsing del CSV: {_hevy_err}")
