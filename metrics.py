@@ -25,12 +25,14 @@ def compute_rtv(ex_type: str, value: float, bw: float,
                 value2: float | None = None,
                 reps_actual: int | None = None,
                 value_drop: float | None = None,
-                reps_drop: int | None = None) -> float:
+                reps_drop: int | None = None,
+                exercise_name: str | None = None) -> float:
     """
     Compute volume-weighted RTV for one exercise entry.
 
     Per-set formula by type:
-      weighted:    (load / bw) × (reps / 10)
+      weighted:    (load / (coeff * bw)) × (reps / 10)  where coeff = reference_bw_coefficient
+                   (coeff defaults to 1.0 when not set; RTV=1.0 means intermediate standard)
       bodyweight:  1.0 × (reps / 10)
       weighted_bw: ((bw + added) / bw) × (reps / 10)  (added < 0 = assisted)
       timed:       duration / TIMED_REFERENCE  (sets not applied)
@@ -50,10 +52,16 @@ def compute_rtv(ex_type: str, value: float, bw: float,
     if ex_type == 'timed':
         return value / TIMED_REFERENCE
 
+    ref_coeff = 1.0
+    if ex_type == 'weighted' and exercise_name:
+        c = get_exercise_meta(exercise_name).get('reference_bw_coefficient')
+        if c:
+            ref_coeff = float(c)
+
     def _single_pass(load: float, n_sets: int, n_reps: int) -> float:
         rep_factor = n_reps / 10.0
         if ex_type == 'weighted':
-            return (load / bw * rep_factor * n_sets) if bw else 0.0
+            return (load / (ref_coeff * bw) * rep_factor * n_sets) if bw else 0.0
         elif ex_type == 'bodyweight':
             return 1.0 * rep_factor * n_sets
         elif ex_type == 'weighted_bw':
@@ -130,6 +138,7 @@ def compute_muscle_scores(df: pd.DataFrame, metric: str = 'freq',
             sets=sets, reps=reps, set_type=set_type,
             value2=value2, reps_actual=reps_actual,
             value_drop=value_drop, reps_drop=reps_drop,
+            exercise_name=ex_name,
         )
 
         # Fractional muscle weights from exercises.json
@@ -208,7 +217,8 @@ def get_reference_rtv_weekly(sessions_per_week: int = 4) -> dict:
         elif ex_type == 'bodyweight':
             rtv = 1.0 * (REF_REPS / 10.0) * REF_SETS
         elif ex_type == 'weighted':
-            rtv = (ref_load / REF_BW) * (REF_REPS / 10.0) * REF_SETS if REF_BW else 0.0
+            coeff = float(ex.get('reference_bw_coefficient') or 1.0)
+            rtv = (ref_load / (coeff * REF_BW)) * (REF_REPS / 10.0) * REF_SETS if REF_BW else 0.0
         elif ex_type == 'weighted_bw':
             rtv = ((REF_BW + ref_load) / REF_BW) * (REF_REPS / 10.0) * REF_SETS if REF_BW else 0.0
         else:
@@ -319,6 +329,7 @@ def exercise_progression(exercise: str) -> pd.DataFrame:
             reps_actual=int(ra) if ra is not None else None,
             value_drop=float(vd) if vd is not None else None,
             reps_drop=int(rd) if rd is not None else None,
+            exercise_name=exercise,
         )
     df_ex['rtv'] = df_ex.apply(_row_rtv, axis=1)
 

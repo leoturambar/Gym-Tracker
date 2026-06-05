@@ -246,3 +246,36 @@ def save_goal(goal: str):
     """Salva l'obiettivo di allenamento."""
     with open(GOAL_FILE, 'w', encoding='utf-8') as f:
         f.write(goal)
+
+
+# ── Hevy import ───────────────────────────────────────────────────────────────
+
+def get_session_dates() -> set:
+    """Return the set of unique date strings ('YYYY-MM-DD') across all sessions."""
+    if not os.path.exists(SESSIONS_FILE):
+        return set()
+    df = load_sessions()
+    if df.empty:
+        return set()
+    return set(df['date'].unique())
+
+
+def import_hevy_rows(df: pd.DataFrame) -> int:
+    """
+    Append rows to sessions.csv, skipping any whose session_id already exists.
+    Does not rewrite or sort the file — appends only.
+    Returns the number of rows actually written.
+    """
+    if df.empty:
+        return 0
+
+    existing = load_sessions()
+    if not existing.empty:
+        existing_ids = set(existing['session_id'].tolist())
+        df = df[~df['session_id'].isin(existing_ids)]
+
+    if df.empty:
+        return 0
+
+    df[SESSIONS_COLS].to_csv(SESSIONS_FILE, mode='a', index=False, header=False)
+    return len(df)

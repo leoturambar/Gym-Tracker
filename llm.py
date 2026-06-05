@@ -1,7 +1,6 @@
 import pandas as pd
 from data_manager import get_bodyweight_on
-from metrics import compute_rtv
-from config import MUSCLES, EX_MUSCLES
+from config import MUSCLES, EX_MUSCLES, get_exercise_meta
 
 # ── LLM backend selection ─────────────────────────────────────────────────────
 # Change this flag to switch between Claude and Ollama
@@ -14,27 +13,33 @@ CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an expert strength and conditioning coach analyzing personal training data.
-You have access to structured session logs with loads, sets, reps, and a normalized
-training stress metric called RTV (Relative Training Volume).
+SYSTEM_PROMPT = """You are an expert strength and conditioning coach
+analyzing personal training data.
 
-RTV is dimensionless and bodyweight-normalized. It incorporates load, sets, and reps
-relative to a 10-rep reference. It is the primary metric for comparing training stress
-across time and muscle groups — prefer it over raw kg values in your analysis.
+SESSION HISTORY lists exercises in this format:
+  EXERCISE: LOAD kg × SETS×REPS (X% of intermediate)
 
-Calibration for RTV interpretation:
-- Isolation exercises (curls, tricep pushdowns, flies, leg extension): typical RTV
-  per session 0.10–0.40. Low absolute kg on these is normal and expected.
-- Compound movements (press, row, squat, hip thrust): typical RTV 0.40–1.20+.
-- Never interpret low absolute loads on isolation exercises as weak performance.
-  Always evaluate RTV values relative to exercise type.
+"X% of intermediate" is the working weight as a percentage of the
+strengthlevel.com intermediate 1RM standard for that exercise,
+adjusted for the athlete's bodyweight.
+  - 100% = at intermediate standard
+  - >100% = above intermediate
+  - <100% = still developing toward intermediate
+Use this figure to assess relative strength level per exercise.
+Never penalize isolation exercises for low absolute kg — evaluate
+them through the % figure. A lateral raise or curl at 80% of
+intermediate is a solid result.
 
-The athlete's persistent notes contain injuries and hard limitations — treat these
-as absolute constraints, never suggest movements that conflict with them.
+MUSCLE GROUP SCORES (0.0–1.0) are normalized within the analysis
+period: 1.0 = most-trained group this period. Use these for muscle
+balance analysis only. They are relative, not absolute.
 
-Be direct, specific, and base every comment on the actual numbers provided.
-Avoid generic advice. Maximum 500 words.
-Always end with: "If you can dodge a wrench, you can dodge a ball." """
+The athlete's persistent notes contain injuries and hard constraints —
+treat them as absolute limits. Never suggest anything that conflicts.
+
+Be direct and specific. Every observation must cite an actual number
+from the data. No generic advice. Max 500 words.
+"""
 
 
 def get_client():
@@ -112,14 +117,8 @@ def _format_exercise_line(row, bw: float) -> str | None:
     rd_raw      = _safe_get(row, 'reps_drop',   None)
     reps_drop   = int(rd_raw) if rd_raw is not None else None
 
-    rtv = compute_rtv(
-        row['type'], row['value'], bw or 0,
-        sets=sets, reps=reps, set_type=set_type,
-        value2=value2, reps_actual=reps_actual,
-    )
-
     if row['type'] == 'timed':
-        return f"  - {name}: {int(row['value'])}s (RTV: {rtv:.2f})"
+        return f"  - {name}: {int(row['value'])}s"
 
     load    = row['value']
     ex_type = row['type']
@@ -150,7 +149,13 @@ def _format_exercise_line(row, bw: float) -> str | None:
     elif set_type not in ('standard', 'none', ''):
         label += f" [{set_type}]"
 
-    label += f" (RTV: {rtv:.2f})"
+    if ex_type == 'weighted' and bw:
+        meta = get_exercise_meta(name)
+        coeff = meta.get('reference_bw_coefficient')
+        if coeff:
+            perf_pct = int((load / (float(coeff) * bw)) * 100)
+            label += f" ({perf_pct}% of intermediate)"
+
     return label
 
 
