@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import time
-from config import DAYS, MUSCLES, get_exercise_meta
+from config import DAYS, MUSCLES, get_exercise_meta, reload_exercises
 from data_manager import (
     init_files, load_sessions, save_session, delete_session,
     get_last_values, get_last_session_meta, save_bodyweight, load_bodyweight,
@@ -16,11 +16,13 @@ from data_manager import (
 from hevy_importer import (
     parse_hevy_csv, group_into_sessions, find_overlap,
     compare_session, sessions_to_csv_rows, load_exercise_map,
+    UNASSIGNED_DAY_ID, UNASSIGNED_DAY_NAME,
 )
 from metrics import (
     compute_muscle_scores, normalize_scores,
     enrich_with_bodyweight, filter_by_period,
-    exercise_progression, get_reference_rtv_weekly
+    exercise_progression, get_reference_rtv_weekly,
+    weekly_muscle_rtv, daily_session_counts, exercise_records, STALL_SESSIONS,
 )
 from llm import get_llm_analysis, call_llm
 
@@ -33,6 +35,9 @@ st.set_page_config(
 )
 
 init_files()
+# Rebuild DAYS / exercise metadata from exercises.json on every run, so
+# routine sync and new exercises take effect without restarting the app.
+reload_exercises()
 
 # ── Module-level constants ────────────────────────────────────────────────────
 
@@ -52,6 +57,64 @@ _MUSCLE_LABELS  = {
     'glutes':     'Glutei',
     'calves':     'Polpacci',
 }
+
+
+# Chart colours: validated 8-slot categorical palette, fixed order (one per muscle
+# in MUSCLES order, never cycled) + a muted grey for comparison/reference marks.
+# Dark mode uses the same hues stepped for the dark surface.
+_DARK = getattr(st.context.theme, 'type', None) == 'dark'
+_C_SERIES = (['#3987e5', '#d95926', '#199e70', '#c98500',
+              '#d55181', '#008300', '#9085e9', '#e66767'] if _DARK else
+             ['#2a78d6', '#eb6834', '#1baf7a', '#eda100',
+              '#e87ba4', '#008300', '#6250d6', '#e34948'])
+_C_MUTED   = '#898781'
+_C_SURFACE = '#0e1117' if _DARK else '#ffffff'   # gap between stacked segments
+_C_TEXT2   = '#c3c2b7' if _DARK else '#52514e'   # secondary text on charts
+# Calendar: rest day → 1 session → 2+ sessions (one blue hue, rising contrast)
+_CAL_SCALE = ([[0.0, '#2a2a28'], [0.5, '#256abf'], [1.0, '#86b6ef']] if _DARK else
+              [[0.0, '#ebeae6'], [0.5, '#5598e7'], [1.0, '#184f95']])
+
+_HISTORY_PAGE = 15  # sessions shown per page in Storico
+
+
+def _format_history_entry(row) -> str:
+    """One-line Italian summary of a logged exercise for the session history."""
+    def _g(col, default=None):
+        v = row.get(col, default)
+        return default if v is None or (isinstance(v, float) and pd.isna(v)) else v
+
+    ex_type  = row['type']
+    sets     = int(_g('sets', 1) or 1)
+    reps     = int(_g('reps', 10) or 0)
+    set_type = str(_g('set_type', 'standard'))
+    value    = float(_g('value', 0.0))
+    v2, ra   = _g('value2'), _g('reps_actual')
+    vd, rd   = _g('value_drop'), _g('reps_drop')
+
+    if ex_type == 'timed':
+        return f"{sets} × {int(value)} s" if sets > 1 else f"{int(value)} s"
+
+    special  = set_type in ('amrap', 'drop_inverse', 'fixed_plus')
+    base     = sets - 1 if special and (set_type == 'amrap' and ra is not None
+                                        or set_type != 'amrap' and v2 is not None) else sets
+    if ex_type == 'bodyweight':
+        load = "corpo libero"
+    elif ex_type == 'weighted_bw':
+        load = (f"assistito {abs(value):g} kg" if value < 0
+                else f"zavorra {value:g} kg" if value > 0 else "corpo libero")
+    else:
+        load = f"{value:g} kg"
+
+    text = f"{load} · {base}×{reps}"
+    if set_type == 'amrap' and ra is not None:
+        text += f" + AMRAP {int(ra)} rip."
+    elif set_type == 'drop_inverse' and v2 is not None:
+        text += f" + {float(v2):g} kg × {int(ra) if ra is not None else reps}"
+        if vd is not None:
+            text += f" → drop {float(vd):g} kg × {int(rd) if rd is not None else reps}"
+    elif set_type == 'fixed_plus' and v2 is not None:
+        text += f" + ultima a {float(v2):g} kg"
+    return text
 
 
 def _load_ex_file() -> dict:
@@ -161,44 +224,12 @@ def _enrich_from_page(exercise_name: str, page_text: str) -> dict | None:
         return None
 
 
-def _apply_exercise_to_config(ex: dict):
-    from config import _EXERCISE_META, EX_MUSCLES, DAYS, _MUSCLE_KEY_MAP, _DAY_ID_MAP
-    name = ex['name']
-    _EXERCISE_META[name] = ex
-    if ex.get('muscles') and ex.get('type') != 'excluded':
-        mapped = list(dict.fromkeys(
-            _MUSCLE_KEY_MAP[k] for k in ex['muscles'] if k in _MUSCLE_KEY_MAP
-        ))
-        if mapped:
-            EX_MUSCLES[name] = mapped
-    for did in ex.get('day_ids', []):
-        day_num = _DAY_ID_MAP.get(did)
-        if day_num is None:
-            continue
-        day = next((d for d in DAYS if d['id'] == day_num), None)
-        if day is None:
-            continue
-        existing = next((e for e in day['exercises'] if e['name'] == name), None)
-        if existing is not None:
-            existing.update({
-                'type':     ex['type'],
-                'set_type': ex.get('set_type', 'standard'),
-                'no_amrap': ex.get('no_amrap', False),
-                'variants': ex.get('variants', []),
-            })
-            if 'default' in ex:
-                existing['default'] = ex['default']
-        else:
-            new_entry: dict = {
-                'name':     name,
-                'type':     ex['type'],
-                'set_type': ex.get('set_type', 'standard'),
-                'no_amrap': ex.get('no_amrap', False),
-                'variants': ex.get('variants', []),
-            }
-            if 'default' in ex:
-                new_entry['default'] = ex['default']
-            day['exercises'].append(new_entry)
+def _padded_range(series: pd.Series, pad: float = 0.15) -> list:
+    """Y-axis range with padding that also works for negative (assisted) values."""
+    lo, hi = float(series.min()), float(series.max())
+    span = hi - lo
+    margin = span * pad if span > 0 else max(abs(hi) * pad, 1.0)
+    return [lo - margin, hi + margin]
 
 
 # ── Day metadata helpers ──────────────────────────────────────────────────────
@@ -435,7 +466,8 @@ with tab_allenamento:
                     value = 0.0
                     st.empty()
                 elif eff_type == 'weighted_bw':
-                    _v_def = max(0.0, float(last_values.get(slot_name) or (slot_ex.get('default', 0) if slot_ex else 0) or 0))
+                    # No clamp at 0: negative = assisted (e.g. -10 kg on assisted pull-ups)
+                    _v_def = float(last_values.get(slot_name) or (slot_ex.get('default', 0) if slot_ex else 0) or 0)
                     value = st.number_input(
                         "kg", value=_v_def, step=1.0,
                         key=f"wval_d{day_id}s{slot_idx}", label_visibility="collapsed"
@@ -612,6 +644,27 @@ with tab_allenamento:
                             _exs2[_ei]['day_ids'].remove(_day_id_str)
                         except (KeyError, ValueError):
                             pass
+                    else:
+                        # Hardcoded-only exercise: create a JSON record so the
+                        # removal sticks (JSON wins over config.py fallbacks).
+                        _slot = next((e for e in day_exercises if e['name'] == _n), {})
+                        _other_days = [
+                            f"D{d['id']}" for d in DAYS
+                            if d['id'] != selected_day['id']
+                            and any(e['name'] == _n for e in d['exercises'])
+                        ]
+                        _rec = {
+                            'name':     _n,
+                            'type':     _slot.get('type', 'weighted'),
+                            'day_ids':  _other_days,
+                            'muscles':  {},
+                            'set_type': _slot.get('set_type', 'standard'),
+                            'no_amrap': _slot.get('no_amrap', False),
+                            'variants': _slot.get('variants', []),
+                        }
+                        if 'default' in _slot:
+                            _rec['default'] = _slot['default']
+                        _exs2.append(_rec)
             else:
                 _days_list2 = _exf2.setdefault('days', [])
                 _day_entry  = next(
@@ -667,10 +720,11 @@ with tab_allenamento:
         sessions_meta = (
             df[['session_id', 'date', 'day_name', 'note']]
             .drop_duplicates(subset='session_id')
-            .sort_values('date', ascending=False)
+            .sort_values(['date', 'session_id'], ascending=False)
         )
+        _hist_limit = st.session_state.get('_hist_limit', _HISTORY_PAGE)
 
-        for _, smeta in sessions_meta.iterrows():
+        for _, smeta in sessions_meta.head(_hist_limit).iterrows():
             sid      = smeta['session_id']
             date     = smeta['date']
             day_name = smeta['day_name']
@@ -683,12 +737,8 @@ with tab_allenamento:
                         st.write(f"~~{row['exercise']}~~ — saltato")
                     elif row['type'] == 'excluded':
                         continue
-                    elif row['type'] == 'timed':
-                        st.write(f"**{row['exercise']}**: {int(row['value'])}s")
-                    elif row['type'] == 'bodyweight':
-                        st.write(f"**{row['exercise']}**: corpo libero")
                     else:
-                        st.write(f"**{row['exercise']}**: {row['value']} kg")
+                        st.write(f"**{row['exercise']}**: {_format_history_entry(row)}")
 
                 if note:
                     st.caption(f"📝 {note}")
@@ -697,18 +747,25 @@ with tab_allenamento:
                     delete_session(sid)
                     st.rerun()
 
+        _n_total = len(sessions_meta)
+        if _n_total > _hist_limit:
+            if st.button(f"Mostra altre (visualizzate {_hist_limit} di {_n_total})",
+                         key="btn_hist_more"):
+                st.session_state['_hist_limit'] = _hist_limit + _HISTORY_PAGE
+                st.rerun()
+
 with tab_analisi:
+
+    df_all = load_sessions()
+    if not df_all.empty:
+        df_all = enrich_with_bodyweight(df_all)
 
     # ── Bilancio muscolare ────────────────────────────────────────────────
     st.subheader("Bilancio muscolare")
 
-    df_all = load_sessions()
-
     if df_all.empty:
         st.info("Nessuna sessione registrata ancora.")
     else:
-        df_all = enrich_with_bodyweight(df_all)
-
         col1, col2 = st.columns(2)
         with col1:
             metric = st.radio(
@@ -729,7 +786,12 @@ with tab_analisi:
                 horizontal=True
             )
 
-        show_reference = st.checkbox("Mostra atleta di riferimento", value=False)
+        show_reference = st.checkbox(
+            "Confronta con l'atleta di riferimento (% per muscolo)", value=False,
+            disabled=(metric != 'rtv'),
+            help="Disponibile solo con la metrica RTV.",
+        )
+        show_reference = show_reference and metric == 'rtv'
 
         if metric == 'rtv' and df_all['bodyweight'].isna().all():
             st.warning("Imposta il peso corporeo nel tab Profilo per usare la metrica RTV.")
@@ -753,14 +815,12 @@ with tab_analisi:
         scores_a = compute_muscle_scores(df_cur, metric, period_weeks=cur_weeks)
         scores_b = compute_muscle_scores(df_prev, metric, period_weeks=prev_weeks)
 
+        # Scores are already RTV per week, so the weekly reference is directly
+        # comparable for every period — no scaling by period length.
         _ref_weekly = get_reference_rtv_weekly()
-        _ref_scale  = 1.0 if period == 'week' else cur_weeks
-        _ref_scaled = {m: v * _ref_scale for m, v in _ref_weekly.items()}
 
         all_values = list(scores_a.values()) + list(scores_b.values())
-        if show_reference:
-            all_values += list(_ref_scaled.values())
-        max_val  = max(all_values) if all_values else 1
+        max_val  = max(all_values) if any(all_values) else 1
         axis_max = max_val * 1.15
 
         categories = MUSCLES + [MUSCLES[0]]
@@ -771,27 +831,17 @@ with tab_analisi:
         fig.add_trace(go.Scatterpolar(
             r=values_b, theta=categories,
             fill='toself', name='Precedente',
-            hovertemplate="%{r:.2f}<extra></extra>",
-            line=dict(color='#5090ff', dash='dash', width=1.5),
-            fillcolor='rgba(80,144,255,0.1)'
+            hovertemplate="%{theta}: %{r:.2f}<extra>Precedente</extra>",
+            line=dict(color=_C_MUTED, dash='dash', width=2),
+            fillcolor='rgba(137,135,129,0.10)'
         ))
         fig.add_trace(go.Scatterpolar(
             r=values_a, theta=categories,
             fill='toself', name='Corrente',
-            hovertemplate="%{r:.2f}<extra></extra>",
-            line=dict(color='#00c878', width=2),
-            fillcolor='rgba(0,200,120,0.18)'
+            hovertemplate="%{theta}: %{r:.2f}<extra>Corrente</extra>",
+            line=dict(color=_C_SERIES[0], width=2),
+            fillcolor='rgba(42,120,214,0.15)'
         ))
-        if show_reference:
-            values_ref = [_ref_scaled.get(m, 0) for m in MUSCLES] + \
-                         [_ref_scaled.get(MUSCLES[0], 0)]
-            fig.add_trace(go.Scatterpolar(
-                r=values_ref, theta=categories,
-                fill='toself', name='Riferimento',
-                hovertemplate="%{r:.2f}<extra></extra>",
-                line=dict(color='#FF8C00', dash='dot', width=1.5),
-                fillcolor='rgba(255,140,0,0.07)'
-            ))
         fig.update_layout(
             polar=dict(
                 bgcolor='rgba(240,240,240,0.3)',
@@ -813,78 +863,258 @@ with tab_analisi:
             margin=dict(l=40, r=40, t=40, b=40)
         )
 
-        # ── Radar (75%) + bar chart (25%) side by side ────────────────────
+        # ── Radar (75%) + bar list (25%) side by side ─────────────────────
         radar_col, bar_col = st.columns([3, 1])
         with radar_col:
             st.plotly_chart(fig, width='stretch')
         with bar_col:
-            st.caption(f"{'RTV / sett.' if metric == 'rtv' else 'esercizi / sett.'}")
-            _max_bar = max(scores_a.values()) if any(scores_a.values()) else 1
-            for m in MUSCLES:
-                _v = scores_a.get(m, 0)
-                st.progress(_v / _max_bar if _max_bar > 0 else 0, text=f"{m}: {_v:.2f}")
+            if show_reference:
+                st.caption("% dell'atleta di riferimento (RTV / sett.)")
+                for m in MUSCLES:
+                    _ref = _ref_weekly.get(m, 0)
+                    if _ref > 0:
+                        _pct = scores_a.get(m, 0) / _ref
+                        st.progress(min(_pct, 1.0), text=f"{m}: {_pct:.0%}")
+                    else:
+                        st.progress(0.0, text=f"{m}: — (nessun riferimento)")
+                st.caption("100% = volume settimanale dell'atleta di riferimento (75 kg).")
+            else:
+                st.caption(f"{'RTV / sett.' if metric == 'rtv' else 'esercizi / sett.'}")
+                _max_bar = max(scores_a.values()) if any(scores_a.values()) else 1
+                for m in MUSCLES:
+                    _v = scores_a.get(m, 0)
+                    st.progress(_v / _max_bar if _max_bar > 0 else 0, text=f"{m}: {_v:.2f}")
+
+        # ── Trend settimanale RTV per muscolo ─────────────────────────────
+        st.subheader("Trend settimanale")
+        _n_weeks = st.radio(
+            "Finestra", options=[12, 26, 52], horizontal=True,
+            format_func=lambda n: f"{n} settimane", key="trend_weeks",
+        )
+        _weekly = weekly_muscle_rtv(df_all, n_weeks=_n_weeks)
+        _x = [d.strftime('%d/%m') for d in _weekly.index]
+        _x[-1] = _x[-1] + ' (in corso)'
+
+        _fig_tr = go.Figure()
+        for i, m in enumerate(MUSCLES):
+            _fig_tr.add_trace(go.Bar(
+                x=_x, y=_weekly[m], name=m,
+                marker=dict(color=_C_SERIES[i], line=dict(color=_C_SURFACE, width=1)),
+                hovertemplate=f"{m}: %{{y:.2f}}<extra></extra>",
+            ))
+        _ref_total = sum(_ref_weekly.values())
+        if _ref_total > 0:
+            _fig_tr.add_hline(
+                y=_ref_total, line=dict(color=_C_MUTED, dash='dot', width=2),
+                annotation_text=f"Riferimento {_ref_total:.1f}",
+                annotation_position='top left',
+                annotation_font=dict(color=_C_TEXT2, size=11),
+            )
+        _fig_tr.update_layout(
+            barmode='stack', bargap=0.25, height=380,
+            hovermode='x unified',
+            yaxis=dict(title='RTV / settimana', gridcolor='rgba(150,150,150,0.25)'),
+            xaxis=dict(title='Settimana dal', tickangle=-45 if _n_weeks > 12 else 0),
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0, traceorder='normal'),
+            margin=dict(l=0, r=0, t=40, b=0),
+        )
+        st.plotly_chart(_fig_tr, width='stretch')
+        st.caption("Ogni barra è una settimana (lunedì–domenica); l'ultima è quella in corso, "
+                   "quindi parziale. La linea tratteggiata è il volume totale "
+                   "dell'atleta di riferimento.")
+        with st.expander("Tabella trend"):
+            _tbl = _weekly.copy()
+            _tbl.index = _x
+            _tbl['Totale'] = _tbl.sum(axis=1)
+            st.dataframe(_tbl.round(2).iloc[::-1], width='stretch')
+
+        # ── Costanza ──────────────────────────────────────────────────────
+        st.subheader("Costanza")
+        _counts = daily_session_counts(df_all)
+        _cal_weeks = 26
+        _monday = _today_n - pd.Timedelta(days=_today_n.weekday())
+        _start = _monday - pd.Timedelta(weeks=_cal_weeks - 1)
+        _days = pd.date_range(_start, _monday + pd.Timedelta(days=6), freq='D')
+        _weekdays = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom']
+        _z = [[None] * _cal_weeks for _ in range(7)]
+        _txt = [[''] * _cal_weeks for _ in range(7)]
+        for _d in _days:
+            _w = (_d - _start).days // 7
+            _wd = _d.weekday()
+            if _d > _today_n:
+                continue
+            _n = int(_counts.get(_d.strftime('%Y-%m-%d'), 0))
+            _z[_wd][_w] = min(_n, 2)
+            _txt[_wd][_w] = (f"{_d.strftime('%d/%m/%Y')}: "
+                             f"{_n} session{'e' if _n == 1 else 'i'}")
+        _week_labels = [(_start + pd.Timedelta(weeks=i)).strftime('%d/%m')
+                        for i in range(_cal_weeks)]
+
+        _sess_per_week = []
+        for i in range(_cal_weeks):
+            _ws = _start + pd.Timedelta(weeks=i)
+            _we = _ws + pd.Timedelta(days=6)
+            _sess_per_week.append(int(sum(
+                v for k, v in _counts.items()
+                if _ws <= pd.Timestamp(k) <= _we
+            )))
+        _streak = 0
+        # current week may still be empty: start counting from last week then
+        _seq = _sess_per_week[:-1] if _sess_per_week[-1] == 0 else _sess_per_week
+        for v in reversed(_seq):
+            if v == 0:
+                break
+            _streak += 1
+        _last4 = sum(_sess_per_week[-4:])
+        _avg12 = sum(_sess_per_week[-12:]) / 12
+
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Sessioni ultime 4 settimane", _last4)
+        k2.metric("Media sessioni / sett. (12 sett.)", f"{_avg12:.1f}")
+        k3.metric("Settimane consecutive attive", _streak)
+
+        _fig_cal = go.Figure(go.Heatmap(
+            z=_z, x=_week_labels, y=_weekdays, text=_txt,
+            hovertemplate="%{text}<extra></extra>",
+            colorscale=_CAL_SCALE,
+            zmin=0, zmax=2, xgap=3, ygap=3, showscale=False,
+        ))
+        _fig_cal.update_layout(
+            height=230, margin=dict(l=0, r=0, t=10, b=0),
+            yaxis=dict(autorange='reversed', showgrid=False),
+            xaxis=dict(showgrid=False, tickangle=-45, nticks=13),
+            plot_bgcolor='rgba(0,0,0,0)',
+        )
+        st.plotly_chart(_fig_cal, width='stretch')
+        st.caption("Ultime 26 settimane. Grigio = riposo, blu = 1 sessione, "
+                   "blu più intenso = 2 o più. Passa sopra una cella per la data.")
 
     st.divider()
 
     # ── Progressione ──────────────────────────────────────────────────────
     st.subheader("Progressione")
 
-    weighted_exercises = sorted(set(
-        ex['name']
-        for day in DAYS
-        for ex in day['exercises']
-        if ex['type'] in ('weighted', 'weighted_bw')
-    ))
-
-    selected_ex = st.selectbox("Esercizio", weighted_exercises)
-    df_prog     = exercise_progression(selected_ex)
-
-    if df_prog.empty:
-        st.info("Nessun dato per questo esercizio ancora.")
+    if df_all.empty:
+        st.info("Nessun dato ancora.")
     else:
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Sessioni", len(df_prog))
-        with col2:
-            st.metric("Massimo", f"{df_prog['value'].max():.1f} kg")
-        with col3:
-            st.metric("Attuale", f"{df_prog['value'].iloc[-1]:.1f} kg")
-        with col4:
-            st.metric("Progresso", f"{df_prog['value'].iloc[-1] - df_prog['value'].iloc[0]:+.1f} kg")
+        _records = exercise_records(df_all)
+        if not _records.empty:
+            st.markdown("**Record e stalli**")
+            _rec = _records.sort_values(['since_pr', 'exercise'], ascending=[False, True])
 
-        # ── Load (left) + RTV (right) side by side ────────────────────────
-        prog_left, prog_right = st.columns([1, 1])
-        with prog_left:
-            st.subheader("Carico (kg)")
-            _fig_kg = go.Figure()
-            _fig_kg.add_trace(go.Scatter(
-                x=df_prog['date'], y=df_prog['value'],
-                mode='lines+markers', name='kg',
-                line=dict(color='#00c878', width=2), marker=dict(size=8)
-            ))
-            _fig_kg.update_layout(
-                yaxis=dict(range=[df_prog['value'].min() * 0.85,
-                                  df_prog['value'].max() * 1.15]),
-                margin=dict(l=0, r=0, t=20, b=0), height=300,
+            def _status(n: int) -> str:
+                if n >= STALL_SESSIONS:
+                    return f"⚠️ Fermo da {n} sessioni"
+                if n == 0:
+                    return "🏆 Record all'ultima sessione"
+                return f"✅ Record {n} session{'e' if n == 1 else 'i'} fa"
+
+            st.dataframe(
+                pd.DataFrame({
+                    'Esercizio':      _rec['exercise'],
+                    'Stato':          _rec['since_pr'].apply(_status),
+                    'Sessioni':       _rec['sessions'],
+                    'Carico max (kg)': _rec['max_load'],
+                    '1RM stimato (kg)': _rec['best_e1rm'],
+                    'Data record':    _rec['pr_date'],
+                    'Ultima volta':   _rec['last_date'],
+                }),
+                hide_index=True, width='stretch',
+                column_config={
+                    'Carico max (kg)':  st.column_config.NumberColumn(format="%.1f"),
+                    '1RM stimato (kg)': st.column_config.NumberColumn(format="%.1f"),
+                },
             )
-            st.plotly_chart(_fig_kg, width='stretch')
-        with prog_right:
-            if df_prog['rtv'].sum() > 0:
-                st.subheader("RTV nel tempo")
-                _fig_rtv = go.Figure()
-                _fig_rtv.add_trace(go.Scatter(
-                    x=df_prog['date'], y=df_prog['rtv'],
-                    mode='lines+markers', name='RTV',
-                    line=dict(color='#5090ff', width=2), marker=dict(size=8)
+            st.caption(
+                f"Record = miglior 1RM stimato (Epley; include AMRAP e serie finali più "
+                f"pesanti). «Fermo» = {STALL_SESSIONS}+ sessioni senza superarlo. "
+                "Per gli esercizi con zavorra/assistenza il 1RM include il peso corporeo."
+            )
+
+        _prog_names = set(
+            ex['name']
+            for day in DAYS
+            for ex in day['exercises']
+            if ex['type'] in ('weighted', 'weighted_bw')
+        )
+        _logged = sorted(_records['exercise']) if not _records.empty else []
+        # Exercises with logged data first, then the rest of the routine
+        weighted_exercises = _logged + sorted(_prog_names - set(_logged))
+
+        selected_ex = st.selectbox("Esercizio", weighted_exercises)
+        df_prog     = exercise_progression(selected_ex, df_all)
+
+        if df_prog.empty:
+            st.info("Nessun dato per questo esercizio ancora.")
+        else:
+            _has_e1rm = df_prog['e1rm'].notna().any()
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Sessioni", len(df_prog))
+            with col2:
+                st.metric("Carico attuale", f"{df_prog['value'].iloc[-1]:.1f} kg",
+                          delta=f"{df_prog['value'].iloc[-1] - df_prog['value'].iloc[0]:+.1f} kg dall'inizio",
+                          delta_color='off')
+            with col3:
+                st.metric("Carico massimo", f"{df_prog['value'].max():.1f} kg")
+            with col4:
+                if _has_e1rm:
+                    _e = df_prog['e1rm'].dropna()
+                    st.metric("1RM stimato", f"{_e.iloc[-1]:.1f} kg",
+                              delta=f"{_e.iloc[-1] - _e.iloc[0]:+.1f} kg dall'inizio")
+                else:
+                    st.metric("1RM stimato", "—")
+
+            _ex_types = df_all.loc[df_all['exercise'] == selected_ex, 'type']
+            _is_weighted = (not _ex_types.empty) and _ex_types.iloc[-1] == 'weighted'
+
+            prog_left, prog_right = st.columns([1, 1])
+            with prog_left:
+                if _has_e1rm and _is_weighted:
+                    st.markdown("**Carico e 1RM stimato (kg)**")
+                else:
+                    st.markdown("**Carico (kg)**")
+                _fig_kg = go.Figure()
+                _fig_kg.add_trace(go.Scatter(
+                    x=df_prog['date'], y=df_prog['value'],
+                    mode='lines+markers', name='Carico di lavoro',
+                    line=dict(color=_C_SERIES[0], width=2), marker=dict(size=8),
+                    hovertemplate="%{x}: %{y:.1f} kg<extra>Carico</extra>",
                 ))
-                _fig_rtv.update_layout(
-                    yaxis=dict(range=[df_prog['rtv'].min() * 0.85,
-                                      df_prog['rtv'].max() * 1.15]),
-                    margin=dict(l=0, r=0, t=20, b=0), height=300,
+                _y_all = df_prog['value']
+                if _has_e1rm and _is_weighted:
+                    _fig_kg.add_trace(go.Scatter(
+                        x=df_prog['date'], y=df_prog['e1rm'],
+                        mode='lines+markers', name='1RM stimato',
+                        line=dict(color=_C_SERIES[1], width=2, dash='dot'),
+                        marker=dict(size=8),
+                        hovertemplate="%{x}: %{y:.1f} kg<extra>1RM stimato</extra>",
+                    ))
+                    _y_all = pd.concat([_y_all, df_prog['e1rm'].dropna()])
+                _fig_kg.update_layout(
+                    yaxis=dict(range=_padded_range(_y_all)),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+                    hovermode='x unified',
+                    margin=dict(l=0, r=0, t=30, b=0), height=300,
                 )
-                st.plotly_chart(_fig_rtv, width='stretch')
-            else:
-                st.caption("Imposta il peso corporeo nel tab Profilo per vedere il grafico RTV.")
+                st.plotly_chart(_fig_kg, width='stretch')
+            with prog_right:
+                if df_prog['rtv'].sum() > 0:
+                    st.markdown("**RTV nel tempo**")
+                    _fig_rtv = go.Figure()
+                    _fig_rtv.add_trace(go.Scatter(
+                        x=df_prog['date'], y=df_prog['rtv'],
+                        mode='lines+markers', name='RTV',
+                        line=dict(color=_C_SERIES[0], width=2), marker=dict(size=8),
+                        hovertemplate="%{x}: %{y:.2f}<extra>RTV</extra>",
+                    ))
+                    _fig_rtv.update_layout(
+                        yaxis=dict(range=_padded_range(df_prog['rtv'])),
+                        margin=dict(l=0, r=0, t=30, b=0), height=300,
+                    )
+                    st.plotly_chart(_fig_rtv, width='stretch')
+                else:
+                    st.caption("Imposta il peso corporeo nel tab Profilo per vedere il grafico RTV.")
 
     st.divider()
 
@@ -929,7 +1159,7 @@ with tab_analisi:
         current_bw   = get_bodyweight_on(str(pd.Timestamp.today().date()))
         user_profile = {
             'bodyweight': current_bw,
-            'goal':       st.session_state.get('goal', 'non specificato'),
+            'goal':       load_goal() or 'non specificato',
             'memory':     load_memory(),
         }
 
@@ -964,12 +1194,28 @@ with tab_profilo:
 
     with col2:
         if not df_bw.empty:
-            st.caption("Storico peso corporeo")
-            st.dataframe(
-                df_bw.sort_values('date', ascending=False).reset_index(drop=True),
-                width='stretch',
-                hide_index=True
+            _bw_plot = df_bw.dropna().copy()
+            _bw_plot['date'] = pd.to_datetime(_bw_plot['date'])
+            _bw_plot = _bw_plot.sort_values('date')
+            st.markdown("**Peso corporeo nel tempo**")
+            _fig_bw = go.Figure(go.Scatter(
+                x=_bw_plot['date'], y=_bw_plot['bodyweight'],
+                mode='lines+markers', name='Peso',
+                line=dict(color=_C_SERIES[0], width=2), marker=dict(size=8),
+                hovertemplate="%{x|%d/%m/%Y}: %{y:.1f} kg<extra></extra>",
+            ))
+            _fig_bw.update_layout(
+                yaxis=dict(range=_padded_range(_bw_plot['bodyweight']),
+                           title='kg'),
+                margin=dict(l=0, r=0, t=10, b=0), height=260,
             )
+            st.plotly_chart(_fig_bw, width='stretch')
+            with st.expander("Storico peso corporeo"):
+                st.dataframe(
+                    df_bw.sort_values('date', ascending=False).reset_index(drop=True),
+                    width='stretch',
+                    hide_index=True
+                )
         else:
             st.info("Nessuna misurazione ancora.")
 
@@ -1102,7 +1348,7 @@ with tab_profilo:
                 else:
                     exercises_data.append(new_ex)
                 _save_exercises_json(exercises_data)
-                _apply_exercise_to_config(new_ex)
+                reload_exercises()
 
                 for k in (['new_ex_name', 'new_ex_days', '_new_ex_suggested']
                           + [f"mw_{m}" for m in _MUSCLE_KEYS]):
@@ -1205,6 +1451,17 @@ with tab_profilo:
                 st.markdown(
                     f"**{_X} sessioni trovate · {_Y} nuove · {_Z} già presenti**"
                 )
+
+                _unassigned = [s for s in _new_sess if s['day_id'] == UNASSIGNED_DAY_ID]
+                if _unassigned:
+                    st.warning(
+                        f"{len(_unassigned)} sessioni senza prefisso D1–D4 nel titolo: "
+                        f"verranno importate come «{UNASSIGNED_DAY_NAME}» (contano "
+                        "nell'analisi, ma non precompilano nessun giorno). "
+                        "La Leg press di queste sessioni viene saltata, perché la "
+                        "variante dipende dal giorno.\n\n"
+                        + "\n".join(f"- {s['date']} · {s['title']}" for s in _unassigned)
+                    )
 
                 # ── Step 2: session overview ──────────────────────────────
                 _ov_left, _ov_right = st.columns(2)

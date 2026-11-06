@@ -9,7 +9,7 @@ LLM_BACKEND = "ollama"  # "claude" or "ollama"
 OLLAMA_MODEL = "qwen3.5:9b" #"qwen2.5:14b"
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = "claude-sonnet-5-5"
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -39,6 +39,10 @@ treat them as absolute limits. Never suggest anything that conflicts.
 
 Be direct and specific. Every observation must cite an actual number
 from the data. No generic advice. Max 500 words.
+
+Always end your response with a short quote from the movie
+"Dodgeball: A True Underdog Story" (2004), ideally one that fits the
+analysis. This is mandatory.
 """
 
 
@@ -93,6 +97,18 @@ def _safe_get(row, col, default=None):
     return v
 
 
+def _fmt_kg(v: float) -> str:
+    """Format a load without losing half-kilo steps: 22.5 → '22.5', 20.0 → '20'."""
+    return f"{float(v):g}"
+
+
+def _valid_bw(v) -> float:
+    """Bodyweight as float, 0.0 for None/NaN (NaN is truthy, so `or 0` is not enough)."""
+    if v is None or pd.isna(v):
+        return 0.0
+    return float(v)
+
+
 def _format_exercise_line(row, bw: float) -> str | None:
     """
     Format one exercise row for the session history block.
@@ -123,29 +139,29 @@ def _format_exercise_line(row, bw: float) -> str | None:
     load    = row['value']
     ex_type = row['type']
 
-    # For amrap/drop_inverse the special final set is counted within sets,
+    # For amrap/drop_inverse/fixed_plus the special final set is counted within sets,
     # so base_sets = sets - 1 are the plain straight sets.
-    base_sets = sets - 1 if set_type in ('amrap', 'drop_inverse') else sets
+    base_sets = sets - 1 if set_type in ('amrap', 'drop_inverse', 'fixed_plus') else sets
 
     if ex_type == 'bodyweight':
         label = f"  - {name}: BW × {base_sets}×{reps}"
     elif ex_type == 'weighted_bw':
         sign = '+' if load >= 0 else ''
-        label = f"  - {name}: BW {sign}{load:.0f} kg × {base_sets}×{reps}"
+        label = f"  - {name}: BW {sign}{_fmt_kg(load)} kg × {base_sets}×{reps}"
     else:
-        label = f"  - {name}: {load} kg × {base_sets}×{reps}"
+        label = f"  - {name}: {_fmt_kg(load)} kg × {base_sets}×{reps}"
 
     # Append final-set detail for each special set type
     if set_type == 'amrap' and reps_actual is not None:
         label += f" + AMRAP {reps_actual} reps"
     elif set_type == 'drop_inverse' and value2 is not None:
         up_reps = reps_actual if reps_actual is not None else reps
-        label += f" + {value2:.0f} kg × {up_reps} reps"
+        label += f" + {_fmt_kg(value2)} kg × {up_reps} reps"
         if value_drop is not None:
             dr = reps_drop if reps_drop is not None else reps
-            label += f" → drop {value_drop:.0f} kg × {dr} reps"
+            label += f" → drop {_fmt_kg(value_drop)} kg × {dr} reps"
     elif set_type == 'fixed_plus' and value2 is not None:
-        label += f" + {value2:.0f} kg (final)"
+        label += f" + {_fmt_kg(value2)} kg (final)"
     elif set_type not in ('standard', 'none', ''):
         label += f" [{set_type}]"
 
@@ -183,9 +199,9 @@ def build_session_summary(df: pd.DataFrame, n_sessions: int = 10) -> str:
         date = sess.iloc[0]['date']
         day_name = sess.iloc[0]['day_name']
         note = sess.iloc[0]['note'] if pd.notna(sess.iloc[0]['note']) else ''
-        bw = (sess.iloc[0].get('bodyweight')
-              if 'bodyweight' in sess.columns
-              else get_bodyweight_on(date))
+        bw = _valid_bw(sess.iloc[0].get('bodyweight')
+                       if 'bodyweight' in sess.columns
+                       else get_bodyweight_on(date))
 
         lines.append(f"\n--- {date} | {day_name} ---")
         if bw:
@@ -194,7 +210,7 @@ def build_session_summary(df: pd.DataFrame, n_sessions: int = 10) -> str:
             lines.append(f"Note: {note}")
 
         for _, row in sess.iterrows():
-            line = _format_exercise_line(row, bw or 0)
+            line = _format_exercise_line(row, bw)
             if line is not None:
                 lines.append(line)
 
