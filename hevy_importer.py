@@ -18,9 +18,23 @@ _ITALIAN_MONTHS = {
     'lug': 7, 'ago': 8, 'set': 9, 'ott': 10, 'nov': 11, 'dic': 12,
 }
 
-_DAY_ID_TO_INT = {'D1': 1, 'D2': 2, 'D3': 3, 'D4': 4}
+# English-locale exports use these abbreviations (feb/mar/apr/nov are shared)
+_ENGLISH_MONTHS = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+
+_MONTHS = {**_ENGLISH_MONTHS, **_ITALIAN_MONTHS}
+
+_DAY_ID_TO_INT = {'D0': 0, 'D1': 1, 'D2': 2, 'D3': 3, 'D4': 4}
+
+# Workouts whose title has no D1–D4 prefix go to this pseudo-day, so they count
+# in muscle analysis but never pre-populate the forms of a real training day.
+UNASSIGNED_DAY_ID = 'D0'
+UNASSIGNED_DAY_NAME = 'Non assegnato'
 
 _DAY_NAME_MAP = {
+    UNASSIGNED_DAY_ID: UNASSIGNED_DAY_NAME,
     'D1': next((d['name'] for d in DAYS if d['id'] == 1), 'Upper Push'),
     'D2': next((d['name'] for d in DAYS if d['id'] == 2), 'Lower Quad'),
     'D3': next((d['name'] for d in DAYS if d['id'] == 3), 'Upper Pull'),
@@ -95,12 +109,16 @@ def save_exercise_map(mapping: dict):
 # ── Date parsing ──────────────────────────────────────────────────────────────
 
 def _parse_hevy_date(s: str) -> datetime:
-    """Parse Italian-locale Hevy timestamp: '4 giu 2026, 15:43' → datetime."""
-    s = s.strip().replace(',', '')
+    """Parse a Hevy timestamp: '4 giu 2026, 15:43' (Italian) or '4 Jun 2026, 15:43'
+    (English) → datetime."""
+    s = str(s).strip().replace(',', '')
     parts = s.split()
     # parts: ['4', 'giu', '2026', '15:43'] or ['4', 'giu', '2026', '15:43:00']
     day = int(parts[0])
-    month = _ITALIAN_MONTHS[parts[1].lower()]
+    month_key = parts[1].lower().rstrip('.')[:3]
+    if month_key not in _MONTHS:
+        raise ValueError(f"Mese non riconosciuto nella data Hevy: '{parts[1]}'")
+    month = _MONTHS[month_key]
     year = int(parts[2])
     time_parts = parts[3].split(':')
     hour = int(time_parts[0])
@@ -117,12 +135,12 @@ _HEVY_COL_CANDIDATES = {
     'start_time':    ['start time'],
     'end_time':      ['end time'],
     'exercise_title': ['exercise_title', 'exercise name'],
-    'set_order':     ['set order'],
+    'set_order':     ['set order', 'set_index'],
     'weight_kg':     ['weight (kg)', 'weight_kg', 'weight'],
     'reps':          ['reps'],
     'distance_m':    ['distance (m)', 'distance_m'],
-    'duration_s':    ['duration (s)', 'duration_s', 'duration'],
-    'notes':         ['notes', 'notes (workout)', 'workout notes'],
+    'duration_s':    ['duration (s)', 'duration_s', 'duration_seconds', 'duration'],
+    'notes':         ['notes', 'notes (workout)', 'workout notes', 'description'],
     'rpe':           ['rpe'],
     'set_type':      ['set type', 'set_type'],
 }
@@ -190,7 +208,7 @@ def group_into_sessions(df: pd.DataFrame) -> list[dict]:
 
     for (title, start_time), grp in df.groupby(['title', 'start_time'], sort=False):
         dt = grp['_dt'].iloc[0]
-        day_id_str = _extract_day_id(str(title)) or 'D1'
+        day_id_str = _extract_day_id(str(title)) or UNASSIGNED_DAY_ID
         session_id = int(dt.timestamp())
         date_str = dt.strftime('%Y-%m-%d')
 

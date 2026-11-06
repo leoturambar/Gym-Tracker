@@ -21,15 +21,25 @@ Python · Streamlit · Pandas · Plotly · Anthropic API (claude-sonnet) · Olla
 - assets/ — screenshots for README
 
 ## Tab layout
-1. Allenamento — session logging (card-based) + session history (Storico)
-2. Analisi — muscle balance radar + bar chart (top) + exercise progression charts (bottom) + AI coaching (bottom)
-3. Profilo — bodyweight log, persistent notes, goal, exercise management tools
+1. Allenamento — session logging (card-based) + session history (Storico, paginated,
+   full sets×reps / set-type detail per exercise)
+2. Analisi — muscle balance radar + bar list (bars switch to "% of reference athlete"
+   when the reference checkbox is on) → weekly RTV trend per muscle (stacked bars,
+   12/26/52 weeks, reference total as dotted line) → Costanza (26-week session
+   calendar + stat tiles) → Progressione (records/stall table, load + e1RM chart,
+   RTV chart) → AI coaching
+3. Profilo — bodyweight log + chart, persistent notes, goal, exercise management tools,
+   Hevy import
+
+Chart colours come from the `_C_SERIES` palette in app.py (fixed order, one slot per
+muscle in MUSCLES order; light/dark variants picked via `st.context.theme`).
 
 ## Key logic
 
 ### RTV (Relative Training Volume)
 The core metric. Implemented in metrics.py. Formula by exercise type:
-- weighted: `(load / bodyweight) × (reps / 10) × sets`
+- weighted: `(load / (coeff × bodyweight)) × (reps / 10) × sets` — coeff is the
+  optional per-exercise `reference_bw_coefficient` (default 1.0)
 - bodyweight: `1.0 × (reps / 10) × sets`
 - weighted_bw: `((bodyweight + added_weight) / bodyweight) × (reps / 10) × sets`
 - timed: `duration / 120` (120s reference, sets not applied)
@@ -41,6 +51,8 @@ added on top.
 For drop_inverse set type: `sets` includes the up-set; formula is `(sets-1)` base
 sets + 1 set at `value2 × (reps_actual or reps)`. The drop set (value_drop/reps_drop)
 is stored but explicitly excluded from RTV.
+For fixed_plus set type: `sets` includes the heavier final set; formula is `(sets-1)`
+base sets + 1 set at `value2 × reps`. Falls back to standard when value2 is missing.
 
 Muscle contribution is fractional, not binary. Each exercise has a `muscles`
 dict in exercises.json mapping muscle group → weight (summing to 1.0).
@@ -57,6 +69,11 @@ Defined in data/exercises.json. Loaded at startup by config.py, which merges
 with hardcoded fallback defaults. Schema per exercise:
 - name, type, day_ids, muscles (dict), set_type, no_amrap, variants, default,
   reference_load, source, exrx_url
+
+`reload_exercises()` in config.py rebuilds DAYS, EX_MUSCLES and the metadata store
+in place from the JSON; app.py calls it at the top of every Streamlit run, so
+JSON changes apply without restarting. A hardcoded built-in day exercise is
+dropped when its JSON record no longer lists that day in `day_ids`.
 
 `get_exercise_meta(name)` in config.py returns the full metadata dict for any
 exercise. Used by app.py for UI pre-population and by metrics.py for fractional
@@ -81,8 +98,16 @@ current day's exercise list and writes structural changes back to exercises.json
 - Removed exercises: remove this day from their `day_ids`
 - Changed set_type: update `set_type` on the exercise record
 
+Removing a hardcoded-only exercise (no JSON record) creates a JSON record with
+the remaining days, so the removal sticks.
+
 Built-in days (D1–D4) use `day_ids` on exercises; custom days have a
 `days[i].exercises` list and are handled separately.
+
+### Hevy import
+Workouts whose title has no D1–D4 prefix are imported as day 0 "Non assegnato"
+(`UNASSIGNED_DAY_ID` in hevy_importer.py): they count in muscle analysis but
+never pre-populate a real day's form. The import preview lists them.
 
 ### Session data model
 sessions.csv columns (one row per exercise per session):
@@ -90,6 +115,10 @@ sessions.csv columns (one row per exercise per session):
 value, value2, set_type, reps_actual, value_drop, reps_drop, skipped, note`
 
 Old rows missing new columns are backfilled with safe defaults by load_sessions().
+
+Bodyweight per session comes from `make_bodyweight_lookup()` in data_manager.py:
+latest measurement on or before the date; sessions before the first measurement
+use the earliest one. Always guard bodyweight against NaN (NaN is truthy).
 Never add new columns without updating load_sessions() defaults.
 
 ### Set types
@@ -99,17 +128,29 @@ Never add new columns without updating load_sessions() defaults.
 - drop_inverse — final set at increased weight (value2) to failure, then
   immediate drop to lower weight (value_drop) to failure; logs reps_actual + reps_drop;
   sets count includes the up-set; drop set excluded from RTV
-- fixed_plus — final set at increased weight (value2), fixed reps, not to failure
+- fixed_plus — final set at increased weight (value2), fixed reps, not to failure;
+  sets count includes the final set
 - none — no intensity modifier (warmup exercises, timed holds)
 
-### 1RM estimation
+### 1RM estimation, records and stalls
 `estimate_1rm(load, reps)` in metrics.py uses Epley formula: `load × (1 + reps/30)`.
-Standalone utility, not used inside RTV calculations.
+Never used inside RTV calculations.
+`session_e1rm(row)` takes the best e1RM of a logged row: base load × reps, AMRAP
+final set × reps_actual, drop_inverse up-set, fixed_plus final set (drop part
+ignored). weighted_bw uses total load (bodyweight + added).
+`exercise_records(df)` returns per-exercise max load, best e1RM, PR date and
+`since_pr` (sessions since the last new best); `>= STALL_SESSIONS` (3) = stalled.
+
+### Other analysis helpers (metrics.py)
+- `row_rtv(row)` / `muscle_split(name, rtv)` — single source for per-row RTV and its
+  fractional split across muscles; reuse them instead of re-deriving RTV.
+- `weekly_muscle_rtv(df, n_weeks)` — Monday-based weekly RTV per muscle.
+- `daily_session_counts(df)` — sessions per date for the calendar.
 
 ### LLM backend
 Configurable via `LLM_BACKEND` flag in llm.py.
 - "claude" — Anthropic API, claude-sonnet-4-20250514, uses system parameter
-- "ollama" — local Ollama via OpenAI-compatible endpoint, system message in messages array
+- "ollama" — local Ollama via the `ollama` Python client, system message in messages array
 Both backends receive the same system prompt and user message structure.
 The prompt always ends with a Dodgeball quote. This is load-bearing for morale.
 

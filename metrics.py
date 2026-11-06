@@ -1,21 +1,6 @@
 import pandas as pd
-from config import MUSCLES, EX_MUSCLES, TIMED_REFERENCE, get_exercise_meta
-from data_manager import load_sessions, get_bodyweight_on
-
-# English JSON muscle keys → Italian MUSCLES names (same mapping as config.py)
-_MUSCLE_KEY_MAP = {
-    'chest':      'Petto',
-    'shoulders':  'Spalle',
-    'triceps':    'Tricipiti',
-    'back':       'Schiena',
-    'biceps':     'Bicipiti',
-    'quads':      'Quadricipiti',
-    'hamstrings': 'Femorali',
-    'core':       'Core',
-    'glutes':     'Femorali',    # merged into Femorali (closest existing group)
-    'calves':     'Quadricipiti',  # matches existing Calf raise mapping
-}
-
+from config import MUSCLES, EX_MUSCLES, TIMED_REFERENCE, get_exercise_meta, _MUSCLE_KEY_MAP
+from data_manager import load_sessions, make_bodyweight_lookup
 
 # ── RTV per singolo esercizio ─────────────────────────────────────────────────
 
@@ -43,6 +28,8 @@ def compute_rtv(ex_type: str, value: float, bw: float,
                     (final set is included in sets count, not added on top)
       drop_inverse: (sets-1) base sets + 1 set at value2×(reps_actual or reps)
                     drop set stored but excluded from RTV; falls back to standard if value2 is None
+      fixed_plus:   (sets-1) base sets + 1 set at value2×reps (final set is heavier,
+                    same reps, not to failure); falls back to standard if value2 is None
 
     Default sets=1 preserves backward compatibility for callers that
     pre-date the schema extension and don't supply sets/reps.
@@ -77,7 +64,60 @@ def compute_rtv(ex_type: str, value: float, bw: float,
         up_reps = reps_actual if reps_actual is not None else reps
         return _single_pass(value, sets - 1, reps) + _single_pass(value2, 1, up_reps)
 
+    if set_type == 'fixed_plus' and value2 is not None:
+        # (sets-1) base sets + 1 heavier final set at value2, same target reps
+        return _single_pass(value, sets - 1, reps) + _single_pass(value2, 1, reps)
+
     return _single_pass(value, sets, reps)
+
+
+# ── Per-row helpers ──────────────────────────────────────────────────────────
+
+def _clean(row, col, default=None):
+    """Read a row field, returning default for missing / None / NaN."""
+    v = row.get(col, default)
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return default
+    return v
+
+
+def row_rtv(row) -> float:
+    """RTV of one session row. Requires a 'bodyweight' column (enrich_with_bodyweight)."""
+    if row['type'] == 'excluded':
+        return 0.0
+    v2 = _clean(row, 'value2')
+    ra = _clean(row, 'reps_actual')
+    vd = _clean(row, 'value_drop')
+    rd = _clean(row, 'reps_drop')
+    return compute_rtv(
+        row['type'], float(_clean(row, 'value', 0.0)), _valid_bw(row.get('bodyweight')),
+        sets=int(_clean(row, 'sets', 1)), reps=int(_clean(row, 'reps', 10)),
+        set_type=str(_clean(row, 'set_type', 'standard')),
+        value2=float(v2) if v2 is not None else None,
+        reps_actual=int(ra) if ra is not None else None,
+        value_drop=float(vd) if vd is not None else None,
+        reps_drop=int(rd) if rd is not None else None,
+        exercise_name=row['exercise'],
+    )
+
+
+def muscle_split(ex_name: str, rtv: float) -> dict:
+    """
+    Split an exercise RTV across muscles using the fractional weights in
+    exercises.json; falls back to an equal split over EX_MUSCLES.
+    """
+    out: dict = {}
+    muscles_raw = get_exercise_meta(ex_name).get('muscles', {})
+    if muscles_raw:
+        for eng_key, weight in muscles_raw.items():
+            italian = _MUSCLE_KEY_MAP.get(eng_key)
+            if italian and italian in MUSCLES:
+                out[italian] = out.get(italian, 0.0) + rtv * weight
+    else:
+        binary = [m for m in EX_MUSCLES.get(ex_name, []) if m in MUSCLES]
+        for m in binary:
+            out[m] = out.get(m, 0.0) + rtv / len(binary)
+    return out
 
 
 # ── Muscle scores da una lista di sessioni ────────────────────────────────────
@@ -103,7 +143,7 @@ def compute_muscle_scores(df: pd.DataFrame, metric: str = 'freq',
     if df.empty:
         return scores
 
-    for _, row in df[~df['skipped']].iterrows():
+    for _, row in df[~df['skipped'].astype(bool)].iterrows():
         ex_name = row['exercise']
 
         if metric == 'freq':
@@ -111,55 +151,47 @@ def compute_muscle_scores(df: pd.DataFrame, metric: str = 'freq',
                 scores[m] += 1.0
             continue
 
-        # rtv path
         if row['type'] == 'excluded':
             continue
-
-        bw = row.get('bodyweight', 0) or 0
-
-        def _get(col, default):
-            v = row.get(col, default)
-            return default if (v is None or (isinstance(v, float) and pd.isna(v))) else v
-
-        sets        = int(_get('sets', 1))
-        reps        = int(_get('reps', 10))
-        set_type    = str(_get('set_type', 'standard'))
-        v2_raw      = _get('value2', None)
-        value2      = float(v2_raw) if v2_raw is not None else None
-        ra_raw      = _get('reps_actual', None)
-        reps_actual = int(ra_raw) if ra_raw is not None else None
-        vd_raw      = _get('value_drop', None)
-        value_drop  = float(vd_raw) if vd_raw is not None else None
-        rd_raw      = _get('reps_drop', None)
-        reps_drop   = int(rd_raw) if rd_raw is not None else None
-
-        rtv = compute_rtv(
-            row['type'], row['value'], bw,
-            sets=sets, reps=reps, set_type=set_type,
-            value2=value2, reps_actual=reps_actual,
-            value_drop=value_drop, reps_drop=reps_drop,
-            exercise_name=ex_name,
-        )
-
-        # Fractional muscle weights from exercises.json
-        meta = get_exercise_meta(ex_name)
-        muscles_raw = meta.get('muscles', {})
-
-        if muscles_raw:
-            for eng_key, weight in muscles_raw.items():
-                italian = _MUSCLE_KEY_MAP.get(eng_key)
-                if italian and italian in MUSCLES:
-                    scores[italian] += rtv * weight
-        else:
-            # Fall back: EX_MUSCLES binary, equal weight per muscle
-            binary = [m for m in EX_MUSCLES.get(ex_name, []) if m in MUSCLES]
-            if binary:
-                equal_w = 1.0 / len(binary)
-                for m in binary:
-                    scores[m] += rtv * equal_w
+        for m, v in muscle_split(ex_name, row_rtv(row)).items():
+            scores[m] += v
 
     n = max(period_weeks, 1 / 7)
     return {m: v / n for m, v in scores.items()}
+
+
+def weekly_muscle_rtv(df: pd.DataFrame, n_weeks: int = 12) -> pd.DataFrame:
+    """
+    RTV per muscle for each of the last n_weeks calendar weeks (Monday-based,
+    current week included even if partial). Weeks without training are 0.
+    Returns a DataFrame indexed by week start, one column per muscle in MUSCLES.
+    Requires a 'bodyweight' column (enrich_with_bodyweight).
+    """
+    today = pd.Timestamp.today().normalize()
+    this_monday = today - pd.Timedelta(days=today.weekday())
+    weeks = pd.DatetimeIndex(
+        [this_monday - pd.Timedelta(weeks=i) for i in range(n_weeks - 1, -1, -1)]
+    )
+    out = pd.DataFrame(0.0, index=weeks, columns=MUSCLES)
+    if df.empty:
+        return out
+
+    d = df[~df['skipped'].astype(bool) & (df['type'] != 'excluded')]
+    dates = pd.to_datetime(d['date'])
+    week_start = dates - pd.to_timedelta(dates.dt.weekday, unit='D')
+    for (_, row), wk in zip(d.iterrows(), week_start):
+        if wk not in out.index:
+            continue
+        for m, v in muscle_split(row['exercise'], row_rtv(row)).items():
+            out.at[wk, m] += v
+    return out
+
+
+def daily_session_counts(df: pd.DataFrame) -> pd.Series:
+    """Number of distinct sessions per date ('YYYY-MM-DD' index)."""
+    if df.empty:
+        return pd.Series(dtype=int)
+    return df.groupby('date')['session_id'].nunique()
 
 
 def get_reference_rtv_weekly(sessions_per_week: int = 4) -> dict:
@@ -258,8 +290,16 @@ def enrich_with_bodyweight(df: pd.DataFrame) -> pd.DataFrame:
     Questo garantisce che il passato non venga mai ricalcolato con il peso attuale.
     """
     df = df.copy()
-    df['bodyweight'] = df['date'].apply(get_bodyweight_on)
+    lookup = make_bodyweight_lookup()  # reads bodyweight.csv once, not per row
+    df['bodyweight'] = df['date'].apply(lookup)
     return df
+
+
+def _valid_bw(v) -> float:
+    """Return bodyweight as float, or 0.0 for None/NaN (NaN is truthy, so `or 0` is not enough)."""
+    if v is None or pd.isna(v):
+        return 0.0
+    return float(v)
 
 
 # ── Filtraggio per periodo ────────────────────────────────────────────────────
@@ -275,8 +315,9 @@ def filter_by_period(df: pd.DataFrame, period: str) -> tuple[pd.DataFrame, pd.Da
     today = pd.Timestamp.today().normalize()
 
     if period == 'week':
-        start_cur = today - pd.Timedelta(days=7)
-        start_prev = today - pd.Timedelta(days=14)
+        # 7 days each, today included: [today-6, today] vs [today-13, today-7]
+        start_cur = today - pd.Timedelta(days=6)
+        start_prev = today - pd.Timedelta(days=13)
         end_prev = start_cur
     elif period == 'month':
         start_cur = today.replace(day=1)
@@ -298,39 +339,112 @@ def filter_by_period(df: pd.DataFrame, period: str) -> tuple[pd.DataFrame, pd.Da
 
 # ── Progressione di un esercizio nel tempo ────────────────────────────────────
 
-def exercise_progression(exercise: str) -> pd.DataFrame:
+def session_e1rm(row) -> float | None:
     """
-    Restituisce un DataFrame con la progressione di un esercizio nel tempo.
-    Colonne: date, value, rtv
+    Best estimated 1RM (Epley) across the sets logged in one row, in kg.
+
+    weighted:    external load. weighted_bw: total load (bodyweight + added),
+    None without a bodyweight. Other types: None.
+    Candidates: base load × reps; AMRAP final set × reps_actual;
+    drop_inverse up-set value2 × (reps_actual or reps); fixed_plus value2 × reps.
+    The drop part of drop_inverse is ignored (fatigued, not a strength signal).
     """
-    df = load_sessions()
-    if df.empty:
-        return pd.DataFrame(columns=['date', 'value', 'rtv'])
+    ex_type = row['type']
+    if ex_type not in ('weighted', 'weighted_bw'):
+        return None
+    offset = 0.0
+    if ex_type == 'weighted_bw':
+        offset = _valid_bw(row.get('bodyweight'))
+        if offset <= 0:
+            return None
 
-    df = enrich_with_bodyweight(df)
-    df_ex = df[(df['exercise'] == exercise) & (~df['skipped'])].copy()
+    value    = float(_clean(row, 'value', 0.0))
+    reps     = int(_clean(row, 'reps', 10))
+    set_type = str(_clean(row, 'set_type', 'standard'))
+    value2   = _clean(row, 'value2')
+    ra       = _clean(row, 'reps_actual')
 
+    cands = [estimate_1rm(value + offset, reps)]
+    if set_type == 'amrap' and ra is not None:
+        cands.append(estimate_1rm(value + offset, int(ra)))
+    elif set_type == 'drop_inverse' and value2 is not None:
+        cands.append(estimate_1rm(float(value2) + offset,
+                                  int(ra) if ra is not None else reps))
+    elif set_type == 'fixed_plus' and value2 is not None:
+        cands.append(estimate_1rm(float(value2) + offset, reps))
+    best = max(cands)
+    return best if best > 0 else None
+
+
+_PROG_COLS = ['date', 'session_id', 'value', 'rtv', 'e1rm',
+              'sets', 'reps', 'set_type', 'reps_actual', 'value2']
+
+
+def exercise_progression(exercise: str, df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """
+    Progression of one exercise over time, one row per logged entry.
+    Columns: date, session_id, value, rtv, e1rm, sets, reps, set_type, reps_actual, value2.
+    Pass an already enriched df (with 'bodyweight') to avoid reloading.
+    """
+    if df is None:
+        df = load_sessions()
+        if df.empty:
+            return pd.DataFrame(columns=_PROG_COLS)
+        df = enrich_with_bodyweight(df)
+
+    df_ex = df[(df['exercise'] == exercise) & (~df['skipped'].astype(bool))].copy()
     if df_ex.empty:
-        return pd.DataFrame(columns=['date', 'value', 'rtv'])
+        return pd.DataFrame(columns=_PROG_COLS)
 
-    def _row_rtv(r):
-        def _fget(col, default):
-            v = r.get(col, default)
-            return default if (v is None or (isinstance(v, float) and pd.isna(v))) else v
-        v2 = _fget('value2', None)
-        ra = _fget('reps_actual', None)
-        vd = _fget('value_drop', None)
-        rd = _fget('reps_drop', None)
-        return compute_rtv(
-            r['type'], r['value'], r['bodyweight'] or 0,
-            sets=int(_fget('sets', 1)), reps=int(_fget('reps', 10)),
-            set_type=str(_fget('set_type', 'standard')),
-            value2=float(v2) if v2 is not None else None,
-            reps_actual=int(ra) if ra is not None else None,
-            value_drop=float(vd) if vd is not None else None,
-            reps_drop=int(rd) if rd is not None else None,
-            exercise_name=exercise,
-        )
-    df_ex['rtv'] = df_ex.apply(_row_rtv, axis=1)
+    df_ex['rtv'] = df_ex.apply(row_rtv, axis=1)
+    df_ex['e1rm'] = df_ex.apply(session_e1rm, axis=1)
+    return df_ex[_PROG_COLS].sort_values(['date', 'session_id']).reset_index(drop=True)
 
-    return df_ex[['date', 'value', 'rtv']].sort_values('date').reset_index(drop=True)
+
+STALL_SESSIONS = 3  # sessions without a new best before an exercise counts as stalled
+
+
+def exercise_records(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Personal records and stall detection for weighted / weighted_bw exercises.
+
+    Strength signal per session = best e1RM (falls back to load when e1RM is
+    unavailable, e.g. weighted_bw without bodyweight). 'since_pr' counts the
+    sessions logged after the last one that set a new best; >= STALL_SESSIONS
+    means stalled. Requires a 'bodyweight' column.
+    Columns: exercise, type, sessions, max_load, best_e1rm, pr_date, last_date, since_pr.
+    """
+    cols = ['exercise', 'type', 'sessions', 'max_load', 'best_e1rm',
+            'pr_date', 'last_date', 'since_pr']
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    d = df[~df['skipped'].astype(bool)
+           & df['type'].isin(['weighted', 'weighted_bw'])].copy()
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+    d['e1rm'] = d.apply(session_e1rm, axis=1)
+    d['signal'] = d['e1rm'].where(d['e1rm'].notna(), d['value'].astype(float))
+
+    rows = []
+    for ex, g in d.groupby('exercise'):
+        per_sess = (g.groupby(['date', 'session_id'])
+                     .agg(signal=('signal', 'max'), value=('value', 'max'),
+                          e1rm=('e1rm', 'max'))
+                     .reset_index()
+                     .sort_values(['date', 'session_id']))
+        best, pr_idx = None, 0
+        for i, sig in enumerate(per_sess['signal']):
+            if best is None or sig > best + 1e-9:
+                best, pr_idx = sig, i
+        has_e1rm = per_sess['e1rm'].notna().any()
+        rows.append({
+            'exercise':  ex,
+            'type':      g['type'].iloc[-1],
+            'sessions':  len(per_sess),
+            'max_load':  float(per_sess['value'].max()),
+            'best_e1rm': float(per_sess['e1rm'].max()) if has_e1rm else None,
+            'pr_date':   per_sess['date'].iloc[pr_idx],
+            'last_date': per_sess['date'].iloc[-1],
+            'since_pr':  len(per_sess) - 1 - pr_idx,
+        })
+    return pd.DataFrame(rows, columns=cols)

@@ -61,16 +61,38 @@ def load_bodyweight() -> pd.DataFrame:
     return pd.read_csv(BW_FILE)
 
 
+def make_bodyweight_lookup():
+    """
+    Load the bodyweight history once and return a function date_str → kg | None.
+
+    Uses the latest measurement on or before the date. For dates before the
+    first measurement it falls back to the earliest measurement (closest known
+    value) instead of returning None, so historical sessions (e.g. Hevy imports)
+    still get a usable RTV. Returns None only when no measurement exists at all.
+    """
+    import bisect
+
+    df = load_bodyweight()
+    df = df.dropna(subset=['date', 'bodyweight'])
+    if df.empty:
+        return lambda on_date: None
+    df = df.assign(date=pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d'))
+    df = df.sort_values('date')
+    dates = df['date'].tolist()
+    values = [float(v) for v in df['bodyweight']]
+
+    def _lookup(on_date) -> float | None:
+        i = bisect.bisect_right(dates, str(on_date)[:10]) - 1
+        return values[max(i, 0)]
+
+    return _lookup
+
+
 def get_bodyweight_on(on_date: str) -> float | None:
     """Restituisce il peso corporeo valido per una data specifica.
-    Usa l'ultima misurazione registrata prima o uguale a quella data."""
-    df = load_bodyweight()
-    if df.empty:
-        return None
-    df = df[df['date'] <= on_date].sort_values('date', ascending=False)
-    if df.empty:
-        return None
-    return float(df.iloc[0]['bodyweight'])
+    Usa l'ultima misurazione registrata prima o uguale a quella data; per date
+    precedenti alla prima misurazione usa la prima disponibile."""
+    return make_bodyweight_lookup()(on_date)
 
 
 # ── Sessioni ──────────────────────────────────────────────────────────────────
