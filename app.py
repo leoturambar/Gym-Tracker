@@ -70,9 +70,22 @@ _C_SERIES = (['#3987e5', '#d95926', '#199e70', '#c98500',
 _C_MUTED   = '#898781'
 _C_SURFACE = '#0e1117' if _DARK else '#ffffff'   # gap between stacked segments
 _C_TEXT2   = '#c3c2b7' if _DARK else '#52514e'   # secondary text on charts
-# Calendar: rest day → 1 session → 2+ sessions (one blue hue, rising contrast)
-_CAL_SCALE = ([[0.0, '#2a2a28'], [0.5, '#256abf'], [1.0, '#86b6ef']] if _DARK else
-              [[0.0, '#ebeae6'], [0.5, '#5598e7'], [1.0, '#184f95']])
+# Calendar colours. Day view is binary (rest / trained: one session per day max).
+# Week view is ordinal 0..4+ sessions: grey for rest, then one blue hue with
+# rising contrast against the surface.
+_C_REST  = '#2a2a28' if _DARK else '#ebeae6'
+_C_TRAIN = '#3987e5' if _DARK else '#2a78d6'
+_WEEK_STEPS = (['#184f95', '#2a78d6', '#6da7ec', '#b7d3f6'] if _DARK else
+               ['#86b6ef', '#3987e5', '#1c5cab', '#0d366b'])
+
+
+def _stepped_scale(colors: list) -> list:
+    """Plotly colorscale with one flat band per integer value 0..len(colors)-1."""
+    n = len(colors)
+    scale = []
+    for i, c in enumerate(colors):
+        scale += [[i / n, c], [(i + 1) / n, c]]
+    return scale
 
 _HISTORY_PAGE = 15  # sessions shown per page in Storico
 
@@ -973,21 +986,86 @@ with tab_analisi:
         k2.metric("Media sessioni / sett. (12 sett.)", f"{_avg12:.1f}")
         k3.metric("Settimane consecutive attive", _streak)
 
-        _fig_cal = go.Figure(go.Heatmap(
-            z=_z, x=_week_labels, y=_weekdays, text=_txt,
-            hovertemplate="%{text}<extra></extra>",
-            colorscale=_CAL_SCALE,
-            zmin=0, zmax=2, xgap=3, ygap=3, showscale=False,
-        ))
-        _fig_cal.update_layout(
-            height=230, margin=dict(l=0, r=0, t=10, b=0),
-            yaxis=dict(autorange='reversed', showgrid=False),
-            xaxis=dict(showgrid=False, tickangle=-45, nticks=13),
-            plot_bgcolor='rgba(0,0,0,0)',
+        _cal_view = st.radio(
+            "Vista", options=['days', 'weeks'], horizontal=True, key="cal_view",
+            format_func=lambda v: {'days':  'Giorni (ultime 26 settimane)',
+                                   'weeks': "Settimane dell'anno"}[v],
         )
-        st.plotly_chart(_fig_cal, width='stretch')
-        st.caption("Ultime 26 settimane. Grigio = riposo, blu = 1 sessione, "
-                   "blu più intenso = 2 o più. Passa sopra una cella per la data.")
+
+        if _cal_view == 'days':
+            _fig_cal = go.Figure(go.Heatmap(
+                z=[[None if v is None else min(v, 1) for v in row] for row in _z],
+                x=_week_labels, y=_weekdays, text=_txt,
+                hovertemplate="%{text}<extra></extra>",
+                colorscale=[[0.0, _C_REST], [0.5, _C_REST],
+                            [0.5, _C_TRAIN], [1.0, _C_TRAIN]],
+                zmin=0, zmax=1, xgap=3, ygap=3, showscale=False,
+            ))
+            _fig_cal.update_layout(
+                height=230, margin=dict(l=0, r=0, t=10, b=0),
+                yaxis=dict(autorange='reversed', showgrid=False),
+                xaxis=dict(showgrid=False, tickangle=-45, nticks=13),
+                plot_bgcolor='rgba(0,0,0,0)',
+            )
+            st.plotly_chart(_fig_cal, width='stretch')
+            st.caption("Ogni casella è un giorno: grigio = riposo, blu = allenamento. "
+                       "Colonne = settimane (dal lunedì indicato).")
+        else:
+            # One cell per ISO week: rows = years (newest on top), columns = week 1..53
+            _first = pd.Timestamp(min(_counts.index)) if len(_counts) else _today_n
+            _first_monday = _first - pd.Timedelta(days=_first.weekday())
+            _iso_now = _today_n.isocalendar()
+            _years = list(range(_first.isocalendar()[0], _iso_now[0] + 1))
+            _per_week: dict = {}
+            for _k, _v in _counts.items():
+                _iy, _iw, _ = pd.Timestamp(_k).isocalendar()
+                _per_week[(_iy, _iw)] = _per_week.get((_iy, _iw), 0) + int(_v)
+
+            _cap = len(_WEEK_STEPS)          # colour cap: 4+ sessions share the top step
+            _zw, _tw = [], []
+            for _y in _years:
+                _row_z, _row_t = [], []
+                for _w in range(1, 54):
+                    try:
+                        _ws = pd.Timestamp.fromisocalendar(_y, _w, 1)
+                    except ValueError:       # year without ISO week 53
+                        _row_z.append(None); _row_t.append('')
+                        continue
+                    if _ws > _today_n or _ws < _first_monday:
+                        _row_z.append(None); _row_t.append('')
+                        continue
+                    _n = _per_week.get((_y, _w), 0)
+                    _row_z.append(min(_n, _cap))
+                    _we = _ws + pd.Timedelta(days=6)
+                    _row_t.append(f"{_y} · sett. {_w} ({_ws.strftime('%d/%m')}–"
+                                  f"{_we.strftime('%d/%m')}): {_n} session"
+                                  f"{'e' if _n == 1 else 'i'}")
+                _zw.append(_row_z); _tw.append(_row_t)
+
+            _colors = [_C_REST] + _WEEK_STEPS
+            _fig_wk = go.Figure(go.Heatmap(
+                z=_zw, x=list(range(1, 54)), y=[str(y) for y in _years], text=_tw,
+                hovertemplate="%{text}<extra></extra>",
+                colorscale=_stepped_scale(_colors),
+                zmin=-0.5, zmax=_cap + 0.5, xgap=3, ygap=3,
+                colorbar=dict(
+                    title=dict(text='Sessioni', side='right'),
+                    tickvals=list(range(_cap + 1)),
+                    ticktext=[str(i) for i in range(_cap)] + [f"{_cap}+"],
+                    thickness=12, len=1.0, outlinewidth=0,
+                ),
+            ))
+            _fig_wk.update_layout(
+                # category axis draws the first year at the bottom → newest on top
+                height=110 + 44 * len(_years), margin=dict(l=0, r=0, t=10, b=0),
+                yaxis=dict(showgrid=False, type='category'),
+                xaxis=dict(showgrid=False, title='Settimana', dtick=4),
+                plot_bgcolor='rgba(0,0,0,0)',
+            )
+            st.plotly_chart(_fig_wk, width='stretch')
+            st.caption("Ogni casella è una settimana dell'anno (lunedì–domenica): "
+                       "più è intenso il blu, più sessioni hai fatto. "
+                       "Passa sopra una casella per le date.")
 
     st.divider()
 
