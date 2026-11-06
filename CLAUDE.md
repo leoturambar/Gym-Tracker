@@ -25,8 +25,8 @@ Python · Streamlit · Pandas · Plotly · Anthropic API (claude-sonnet) · Olla
    full sets×reps / set-type detail per exercise)
 2. Analisi — muscle balance radar + bar list (bars switch to "% of reference athlete"
    when the reference checkbox is on) → weekly RTV trend per muscle (stacked bars,
-   12/26/52 weeks, reference total as dotted line) → Costanza (26-week session
-   calendar + stat tiles) → Progressione (records/stall table, load + e1RM chart,
+   12/26/52 weeks, reference total as dotted line) → Costanza (day view: 26-week rest/trained calendar; week view: one cell per ISO week, rows = years, shaded by sessions 0–4+; plus
+   stat tiles) → Progressione (records/stall table, load + e1RM chart,
    RTV chart) → AI coaching
 3. Profilo — bodyweight log + chart, persistent notes, goal, exercise management tools,
    Hevy import
